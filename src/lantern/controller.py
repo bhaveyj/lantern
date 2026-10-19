@@ -1,0 +1,388 @@
+from __future__ import annotations
+
+import asyncio
+import copy
+import ipaddress
+import logging
+import socket
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
+from urllib.parse import urlparse
+
+import aiohttp
+import pychromecast
+from zeroconf import ServiceBrowser, ServiceListener, Zeroconf
+
+from .media import Preparation, needs_preparation, probe
+from .server import MediaServer
+
+RECEIVER_PING_INTERVAL = 10.0
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class Device:
+    id: str
+    name: str
+    host: str
+    port: int
+    kind: str
+    uuid: str = ""
+    model: str = ""
+
+
+def local_address(destination: str) -> str:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as connection:
+        connection.connect((destination, 9))
+        return connection.getsockname()[0]
+
+
+def validate_host(value: str) -> str:
+    try:
+        address = ipaddress.ip_address(value.strip())
+    except ValueError:
+        raise ValueError("Enter the TV's IPv4 address, such as 192.168.1.25.") from None
+    if address.version != 4 or not address.is_private or address.is_unspecified or address.is_multicast:
+        raise ValueError("Use an IPv4 address on your home network.")
+    return str(address)
+
+
+class Discovery(ServiceListener):
+    def __init__(self, callback: Callable[[str, dict], None]):
+        self.callback = callback
+        self.zeroconf = Zeroconf()
+        self.browser = ServiceBrowser(self.zeroconf, ["_lantern._tcp.local.", "_googlecast._tcp.local."], self)
+
+    def add_service(self, zc, service_type, name):
+        self.update_service(zc, service_type, name)
+
+    def update_service(self, zc, service_type, name):
+        info = zc.get_service_info(service_type, name, timeout=2000)
+        if info and info.parsed_addresses():
+            addresses = [a for a in info.parsed_addresses() if ":" not in a]
+            if not addresses:
+                return
+            props = {k.decode(errors="replace"): v.decode(errors="replace") for k, v in info.properties.items() if v}
+            device = Device(name, props.get("fn", name.split("._")[0]), addresses[0], info.port, "cast" if "_googlecast" in service_type else "receiver", props.get("id", ""), props.get("md", ""))
+            self.callback("device", vars(device))
+
+    def remove_service(self, zc, service_type, name):
+        self.callback("device.removed", {"id": name})
+
+    def close(self):
+        self.browser.cancel()
+        self.zeroconf.close()
+
+
+class Controller:
+    def __init__(self, cache: Path, emit: Callable[[str, dict], None]):
+        self.emit = emit
+        self.server = MediaServer()
+        self.preparation = Preparation(cache)
+        self.session: aiohttp.ClientSession | None = None
+        self.ws: aiohttp.ClientWebSocketResponse | None = None
+        self.reader: asyncio.Task | None = None
+        self.receiver_keepalive_task: asyncio.Task | None = None
+        self.play_task: asyncio.Task | None = None
+        self.preload_task: asyncio.Task | None = None
+        self.cast_poll_task: asyncio.Task | None = None
+        self.playlist: list[dict] = []
+        self.device: Device | None = None
+        self.cast = None
+        self.audio_mimes: list[str] = []
+        self.current_id: str | None = None
+        self.current_position = 0.0
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.cast_enqueued: set[str] = set()
+        self.cast_loaded = False
+        self.cast_finished_id: str | None = None
+        self.mime_types: dict[str, str] = {}
+
+    async def start(self):
+        self.loop = asyncio.get_running_loop()
+        self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12))
+        await self.server.start()
+
+    async def sync(self, items: list[dict]):
+        old_order = [m["id"] for m in self.playlist]
+        previous_paths = {m["id"]: m["path"] for m in self.playlist}
+        prepared_files = dict(self.server.files)
+        self.playlist = copy.deepcopy(items)
+        self.server.files.clear()
+        self.server.subtitles.clear()
+        for item in self.playlist:
+            previous = prepared_files.get(item["id"])
+            self.server.files[item["id"]] = previous if previous_paths.get(item["id"]) == item["path"] and previous and previous.is_file() else Path(item["path"])
+            for subtitle in item["subtitles"]:
+                self.server.subtitles[subtitle["id"]] = Path(subtitle["path"])
+        if self.ws and not self.ws.closed:
+            await self.send({"type": "playlist.snapshot", "items": self.wire_playlist()})
+        if self.cast and self.current_id and old_order != [m["id"] for m in self.playlist]:
+            if self.current_id in {m["id"] for m in self.playlist}:
+                self.queue_play(self.current_id, self.current_position)
+
+    def wire_playlist(self) -> list[dict]:
+        if not self.device:
+            return []
+        host = local_address(self.device.host)
+        return [{"id": m["id"], "title": m["title"], "url": self.server.url(host, m["id"]), "selectedSubtitle": m.get("selected_subtitle"), "subtitles": [{"id": s["id"], "label": s["label"], "url": self.server.subtitle_url(host, s["id"])} for s in m["subtitles"]]} for m in self.playlist]
+
+    async def connect(self, device: dict, pin: str = ""):
+        await self.disconnect()
+        self.device = Device(**device)
+        self.emit("status", {"message": f"Connecting to {self.device.name}…", "busy": True})
+        try:
+            if self.device.kind == "receiver":
+                if len(pin) != 6 or not pin.isdigit():
+                    raise ValueError("Enter the six-digit code displayed by Lantern on your TV.")
+                self.ws = await self.session.ws_connect(f"http://{self.device.host}:{self.device.port}/control", heartbeat=20, max_msg_size=1024 * 1024)
+                await self.send({"type": "pair", "version": 1, "pin": pin, "name": socket.gethostname()})
+                response = await asyncio.wait_for(self.ws.receive_json(), timeout=8)
+                if response.get("type") != "pair.ok":
+                    raise ValueError(response.get("message", "Pairing was rejected by the TV."))
+                self.audio_mimes = response.get("audioMimes", [])
+                self.reader = asyncio.create_task(self.read_receiver())
+                self.receiver_keepalive_task = asyncio.create_task(self.keep_receiver_alive(self.ws))
+                await self.sync(self.playlist)
+            else:
+                device_uuid = uuid.UUID(self.device.uuid) if self.device.uuid else uuid.uuid4()
+                self.cast = await asyncio.to_thread(pychromecast.get_chromecast_from_host, (self.device.host, self.device.port, device_uuid, self.device.model, self.device.name))
+                await asyncio.to_thread(self.cast.wait, 10)
+                self.cast.media_controller.register_status_listener(self)
+                self.cast_poll_task = asyncio.create_task(self.poll_cast())
+            self.emit("connected", {"name": self.device.name, "kind": self.device.kind})
+            self.emit("status", {"message": "Connected · choose a video and play", "busy": False})
+        except Exception:
+            await self.disconnect()
+            raise
+
+    async def send(self, message: dict):
+        if self.ws and not self.ws.closed:
+            await self.ws.send_json(message)
+
+    async def keep_receiver_alive(self, ws: aiohttp.ClientWebSocketResponse):
+        try:
+            while not ws.closed:
+                await asyncio.sleep(RECEIVER_PING_INTERVAL)
+                if not ws.closed:
+                    # aiohttp's automatic heartbeat is postponed by every TV
+                    # state update. NanoWSD still needs inbound traffic within
+                    # 30 seconds, including during untouched/paused playback.
+                    await ws.ping()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.warning("TV control keepalive failed: %s", error)
+            await ws.close()
+
+    async def read_receiver(self):
+        try:
+            async for message in self.ws:
+                if message.type != aiohttp.WSMsgType.TEXT:
+                    continue
+                import json
+                data = json.loads(message.data)
+                if data.get("type") == "playback.state":
+                    self.current_id = data.get("id")
+                    self.current_position = data.get("position", 0)
+                    self.emit("state", data)
+                elif data.get("type") == "request.play":
+                    self.queue_play(data["id"])
+                elif data.get("type") == "error":
+                    self.emit("error", {"message": data.get("message", "The TV could not play this file.")})
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self.emit("error", {"message": f"TV connection lost: {error}"})
+        finally:
+            if self.ws and self.ws.closed:
+                logger.info("TV control connection closed (code %s)", self.ws.close_code)
+                self.emit("disconnected", {})
+                asyncio.create_task(self.disconnect())
+
+    def queue_play(self, media_id: str, position: float = 0):
+        if self.play_task and not self.play_task.done():
+            self.play_task.cancel()
+        self.play_task = asyncio.create_task(self.guarded_play(media_id, position))
+
+    async def guarded_play(self, media_id: str, position: float = 0):
+        try:
+            await self.play(media_id, position)
+        except asyncio.CancelledError:
+            pass
+        except Exception as error:
+            self.emit("error", {"message": str(error)})
+        finally:
+            self.emit("status", {"message": "Ready", "busy": False})
+
+    async def prepared_url(self, item: dict, cast: bool) -> tuple[str, float]:
+        path = Path(item["path"])
+        if not path.is_file():
+            raise ValueError(f"The original file is no longer available: {path.name}")
+        info = await probe(path)
+        self.mime_types[item["id"]] = "video/mp4" if info.video else "audio/mp4"
+        if needs_preparation(info, cast, self.audio_mimes, path.suffix):
+            self.emit("status", {"message": f"Preparing {item['title']}…", "busy": True})
+            path = await self.preparation.prepare(path, info, lambda percent: self.emit("progress", {"percent": percent, "title": item["title"]}))
+        self.server.files[item["id"]] = path
+        return self.server.url(local_address(self.device.host), item["id"]), info.duration
+
+    async def play(self, media_id: str, position: float = 0):
+        if not self.device:
+            raise ValueError("Connect to your TV first.")
+        if self.preload_task and not self.preload_task.done():
+            self.preload_task.cancel()
+            await asyncio.gather(self.preload_task, return_exceptions=True)
+        item = next(m for m in self.playlist if m["id"] == media_id)
+        url, duration = await self.prepared_url(item, self.device.kind == "cast")
+        self.current_id = media_id
+        self.current_position = position
+        if self.device.kind == "receiver":
+            wire = next(m for m in self.wire_playlist() if m["id"] == media_id)
+            wire.update(url=url, duration=duration)
+            await self.send({"type": "playback.load", "item": wire})
+        else:
+            self.cast_enqueued = {media_id}
+            self.cast_loaded = False
+            self.cast_finished_id = None
+            if self.cast.media_controller.status.media_session_id is not None:
+                await asyncio.to_thread(self.cast.media_controller.stop)
+            await self.cast_load(item, url, False, position)
+            self.cast_loaded = True
+            await asyncio.to_thread(self.cast.media_controller.block_until_active, 15)
+            if not self.cast.media_controller.session_active_event.is_set():
+                raise RuntimeError("The Cast receiver did not start. Check that Google Cast is enabled on the TV.")
+            self.preload_task = asyncio.create_task(self.preload_next(media_id))
+        self.emit("state", {"id": media_id, "playing": True, "position": position, "duration": duration})
+
+    async def cast_load(self, item: dict, url: str, enqueue: bool, position: float = 0):
+        sub = next((s for s in item["subtitles"] if s["id"] == item.get("selected_subtitle")), None)
+        subtitle_url = self.server.subtitle_url(local_address(self.device.host), sub["id"]) if sub else None
+        await asyncio.to_thread(self.cast.media_controller.play_media, url, self.mime_types.get(item["id"], "video/mp4"), title=item["title"], stream_type="BUFFERED", subtitles=subtitle_url, subtitles_mime="text/vtt", enqueue=enqueue, current_time=position)
+
+    async def preload_next(self, media_id: str):
+        try:
+            index = next(i for i, m in enumerate(self.playlist) if m["id"] == media_id)
+            if index + 1 < len(self.playlist):
+                item = self.playlist[index + 1]
+                if item["id"] not in self.cast_enqueued:
+                    url, _ = await self.prepared_url(item, True)
+                    await self.cast_load(item, url, True)
+                    self.cast_enqueued.add(item["id"])
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self.emit("notice", {"message": f"Next video could not be queued: {error}"})
+        finally:
+            self.emit("status", {"message": "Connected", "busy": False})
+
+    def new_media_status(self, status):
+        if self.loop and not self.loop.is_closed():
+            self.loop.call_soon_threadsafe(self.on_cast_state, {"id": urlparse(status.content_id or "").path.rsplit("/", 1)[-1], "playing": status.player_state == "PLAYING", "position": status.current_time or 0, "duration": status.duration or 0, "playerState": status.player_state, "idleReason": status.idle_reason})
+
+    async def poll_cast(self):
+        while self.cast:
+            await asyncio.sleep(2)
+            if self.cast and self.cast_loaded:
+                try:
+                    await asyncio.to_thread(self.cast.media_controller.update_status)
+                except Exception:
+                    self.emit("notice", {"message": "Cast status is temporarily unavailable. Reconnect if playback has stopped."})
+
+    def on_cast_state(self, data):
+        if not self.cast_loaded:
+            return
+        if data["id"] in {m["id"] for m in self.playlist}:
+            changed = self.current_id != data["id"]
+            self.current_id = data["id"]
+            self.current_position = data["position"]
+            self.emit("state", data)
+            if changed:
+                self.preload_task = asyncio.create_task(self.preload_next(self.current_id))
+
+    async def command(self, action: str, value=None):
+        if not self.device:
+            return
+        if self.device.kind == "receiver":
+            await self.send({"type": "playback.command", "action": action, "value": value})
+        elif self.cast:
+            mc = self.cast.media_controller
+            if action == "play":
+                await asyncio.to_thread(mc.play)
+            elif action == "pause":
+                await asyncio.to_thread(mc.pause)
+            elif action == "seek":
+                await asyncio.to_thread(mc.seek, max(0, float(value)))
+            elif action == "volume":
+                await asyncio.to_thread(self.cast.set_volume, float(value))
+            elif action in {"next", "previous"} and self.current_id:
+                index = next((i for i, m in enumerate(self.playlist) if m["id"] == self.current_id), 0)
+                index = max(0, min(len(self.playlist) - 1, index + (1 if action == "next" else -1)))
+                self.queue_play(self.playlist[index]["id"])
+
+    async def subtitle(self, media_id: str, subtitle_id: str | None):
+        item = next(m for m in self.playlist if m["id"] == media_id)
+        item["selected_subtitle"] = subtitle_id
+        if self.device and self.device.kind == "receiver":
+            await self.send({"type": "playlist.snapshot", "items": self.wire_playlist()})
+            if self.current_id == media_id:
+                await self.send({"type": "playback.command", "action": "subtitle", "value": subtitle_id})
+        elif self.current_id == media_id:
+            self.emit("notice", {"message": "The subtitle selection will apply when you play this video again in Cast mode."})
+
+    async def stop(self):
+        for task in (self.play_task, self.preload_task):
+            if task and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        if self.ws and not self.ws.closed:
+            await self.send({"type": "playback.command", "action": "stop"})
+        if self.cast:
+            self.cast_loaded = False
+            if self.cast.media_controller.status.media_session_id is not None:
+                await asyncio.to_thread(self.cast.media_controller.stop)
+        self.server.reset()
+        await self.preparation.cleanup_async()
+        for item in self.playlist:
+            self.server.files[item["id"]] = Path(item["path"])
+            for subtitle in item["subtitles"]:
+                self.server.subtitles[subtitle["id"]] = Path(subtitle["path"])
+        self.current_id = None
+        await self.send({"type": "playlist.snapshot", "items": self.wire_playlist()})
+        self.emit("state", {"playing": False, "position": 0, "duration": 0})
+        self.emit("status", {"message": "Stopped", "busy": False})
+
+    async def disconnect(self):
+        try:
+            await self.stop()
+        finally:
+            if self.receiver_keepalive_task:
+                self.receiver_keepalive_task.cancel()
+                await asyncio.gather(self.receiver_keepalive_task, return_exceptions=True)
+                self.receiver_keepalive_task = None
+            if self.reader:
+                self.reader.cancel()
+                await asyncio.gather(self.reader, return_exceptions=True)
+                self.reader = None
+            if self.ws:
+                await self.ws.close()
+                self.ws = None
+            if self.cast:
+                if self.cast_poll_task:
+                    self.cast_poll_task.cancel()
+                    await asyncio.gather(self.cast_poll_task, return_exceptions=True)
+                    self.cast_poll_task = None
+                await asyncio.to_thread(self.cast.disconnect)
+                self.cast = None
+            self.device = None
+            self.emit("disconnected", {})
+
+    async def close(self):
+        try:
+            await self.disconnect()
+        finally:
+            if self.session:
+                await self.session.close()
+            await self.server.stop()

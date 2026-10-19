@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lantern-tv"
+version = "0.1.0"
+description = "Personal Windows to Android TV and Google Cast streaming"
+requires-python = ">=3.12"
+dependencies = [
+  "PySide6>=6.8,<7",
+  "aiohttp>=3.11,<4",
+  "zeroconf>=0.140,<1",
+  "PyChromecast>=14,<15",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9", "pytest-asyncio>=0.25,<1", "pytest-aiohttp>=1,<2", "pyinstaller>=6,<7"]
+
+[project.scripts]
+lantern = "lantern.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
