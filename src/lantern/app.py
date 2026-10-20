@@ -10,12 +10,13 @@ import threading
 from dataclasses import asdict
 from pathlib import Path
 
-from PySide6.QtCore import QLockFile, QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QFontDatabase, QIcon, QPainter, QPixmap
-from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSlider, QSpinBox, QStyle, QSystemTrayIcon, QVBoxLayout, QWidget
+from PySide6.QtCore import QLockFile, QObject, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QColor, QFont, QFontDatabase, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSlider, QSpinBox, QStyle, QStyledItemDelegate, QSystemTrayIcon, QVBoxLayout, QWidget
 
 from .controller import Controller, Device, Discovery, validate_host
 from .library import Library, Subtitle
+from .theme import COLORS, apply_theme
 
 
 def app_directory() -> Path:
@@ -23,18 +24,22 @@ def app_directory() -> Path:
 
 
 def icon() -> QIcon:
-    image = QPixmap(64, 64)
-    image.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(image)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setBrush(QColor("#edb76b"))
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.drawRoundedRect(4, 4, 56, 56, 18, 18)
-    painter.setBrush(QColor("#142925"))
-    painter.drawRoundedRect(19, 15, 10, 35, 4, 4)
-    painter.drawRoundedRect(19, 40, 28, 10, 4, 4)
-    painter.end()
-    return QIcon(image)
+    result = QIcon()
+    for size in (16, 24, 32, 48, 64, 128, 256):
+        image = QPixmap(size, size)
+        image.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.scale(size / 64, size / 64)
+        painter.setBrush(QColor(COLORS["blue"]))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(3, 3, 58, 58, 17, 17)
+        painter.setBrush(QColor(COLORS["background"]))
+        painter.drawRoundedRect(19, 15, 10, 35, 3, 3)
+        painter.drawRoundedRect(19, 40, 28, 10, 3, 3)
+        painter.end()
+        result.addPixmap(image)
+    return result
 
 
 class Worker(QObject):
@@ -97,6 +102,56 @@ class Worker(QObject):
         self.thread.join(3)
 
 
+class PlaylistDelegate(QStyledItemDelegate):
+    def sizeHint(self, option, index):
+        return QSize(200, 68)
+
+    def paint(self, painter, option, index):
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
+        focused = bool(option.state & QStyle.StateFlag.State_HasFocus)
+        rect = QRectF(option.rect).adjusted(2, 2, -2, -2)
+        painter.setBrush(QColor(COLORS["blue_surface"] if selected else COLORS["raised"] if hovered else COLORS["surface"]))
+        painter.setPen(QPen(QColor(COLORS["blue"] if selected or focused else "#1b2638"), 1))
+        painter.drawRoundedRect(rect, 9, 9)
+        badge = QRectF(rect.left() + 13, rect.top() + (rect.height() - 43) / 2, 43, 43)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#17376a" if selected else "#132039"))
+        painter.drawRoundedRect(badge, 8, 8)
+        font = QFont(option.font)
+        font.setPixelSize(10)
+        font.setWeight(QFont.Weight.Bold)
+        painter.setFont(font)
+        painter.setPen(QColor("#a8cdff" if selected else COLORS["blue"]))
+        painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, str(index.data(int(Qt.ItemDataRole.UserRole) + 1) or "FILE"))
+        lines = str(index.data(Qt.ItemDataRole.DisplayRole) or "").split("\n", 1)
+        left, width = rect.left() + 71, int(rect.width() - 125)
+        font.setPixelSize(14)
+        font.setWeight(QFont.Weight.DemiBold)
+        painter.setFont(font)
+        painter.setPen(QColor(COLORS["text"]))
+        title = painter.fontMetrics().elidedText(lines[0], Qt.TextElideMode.ElideMiddle, width)
+        painter.drawText(QRectF(left, rect.top() + 12, width, 25), Qt.AlignmentFlag.AlignVCenter, title)
+        font.setPixelSize(11)
+        font.setWeight(QFont.Weight.Normal)
+        painter.setFont(font)
+        painter.setPen(QColor("#9fbbe5" if selected else COLORS["muted"]))
+        detail = painter.fontMetrics().elidedText(lines[1] if len(lines) > 1 else "", Qt.TextElideMode.ElideMiddle, width)
+        painter.drawText(QRectF(left, rect.top() + 38, width, 20), Qt.AlignmentFlag.AlignVCenter, detail)
+        painter.setPen(QColor(COLORS["blue"] if selected else COLORS["disabled"]))
+        painter.drawText(QRectF(rect.right() - 40, rect.top(), 25, rect.height()), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, f"{index.row() + 1:02}")
+        painter.restore()
+
+
+class ElidedLabel(QLabel):
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        text = self.fontMetrics().elidedText(self.text(), Qt.TextElideMode.ElideRight, self.contentsRect().width())
+        painter.drawText(self.contentsRect(), self.alignment(), text)
+
+
 class Playlist(QListWidget):
     files_dropped = Signal(list)
 
@@ -105,7 +160,30 @@ class Playlist(QListWidget):
         self.setAcceptDrops(True)
         self.setDragDropMode(QListWidget.DragDropMode.InternalMove)
         self.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
-        self.setSpacing(4)
+        self.setSpacing(2)
+        self.setMouseTracking(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setItemDelegate(PlaylistDelegate(self))
+        self.placeholder = QWidget(self.viewport())
+        self.placeholder.setObjectName("emptyState")
+        self.placeholder.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        empty_layout = QVBoxLayout(self.placeholder)
+        empty_layout.setContentsMargins(20, 12, 20, 12)
+        empty_layout.setSpacing(9)
+        empty_layout.addStretch()
+        empty_icon = label("+", "emptyIcon")
+        empty_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty_icon.setFixedSize(48, 48)
+        empty_layout.addWidget(empty_icon, 0, Qt.AlignmentFlag.AlignHCenter)
+        for text, name in [("A good night starts with a file.", "emptyTitle"), ("Drop video or audio here, or choose Add files.", "muted")]:
+            item = label(text, name)
+            item.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty_layout.addWidget(item)
+        empty_layout.addStretch()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.placeholder.setGeometry(self.viewport().rect())
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -127,38 +205,6 @@ class Playlist(QListWidget):
             super().dropEvent(event)
 
 
-STYLES = """
-QWidget { background:#112521; color:#edf3e9; font-family:'Segoe UI'; font-size:14px; }
-QMainWindow { background:#112521; }
-QLabel#brand { color:#edb76b; font-size:24px; font-weight:700; }
-QLabel#hero { font-size:32px; font-weight:650; }
-QLabel#muted { color:#9eafa5; }
-QLabel#section { font-size:13px; color:#9eafa5; font-weight:650; }
-QLabel#now { font-size:19px; font-weight:600; }
-QWidget#card { background:#1a332c; border-radius:16px; }
-QWidget#card QLabel { background:transparent; }
-QPushButton { background:#28463a; border:1px solid #355548; border-radius:8px; padding:10px 15px; font-weight:550; }
-QPushButton:hover { background:#365a48; }
-QPushButton:disabled { color:#6b8376; background:#1d362d; }
-QPushButton#primary { background:#edb76b; color:#172c23; border:none; }
-QPushButton#primary:hover { background:#f5cb8e; }
-QComboBox, QLineEdit, QSpinBox { background:#11251f; border:1px solid #42604d; border-radius:7px; padding:9px; min-height:20px; }
-QComboBox QAbstractItemView { background:#1a332c; selection-background-color:#43654b; }
-QListWidget { background:#112521; border:none; outline:none; }
-QListWidget::item { background:#1a332c; border:1px solid #254838; border-radius:9px; padding:13px; min-height:42px; }
-QListWidget::item:selected { background:#304f3d; border:1px solid #edb76b; }
-QListWidget::item:hover { background:#254536; }
-QSlider::groove:horizontal { height:5px; background:#3a5547; border-radius:2px; }
-QSlider::sub-page:horizontal { background:#edb76b; border-radius:2px; }
-QSlider::handle:horizontal { background:#edb76b; width:13px; margin:-5px 0; border-radius:6px; }
-QProgressBar { border:none; background:#294637; height:5px; border-radius:2px; }
-QProgressBar::chunk { background:#edb76b; border-radius:2px; }
-QMenu { background:#1a332c; border:1px solid #42604d; padding:6px; }
-QMenu::item:selected { background:#365a48; }
-QToolTip { background:#edb76b; color:#142925; padding:5px; }
-"""
-
-
 def label(text, name=None):
     widget = QLabel(text)
     if name:
@@ -178,8 +224,8 @@ class Window(QMainWindow):
         super().__init__()
         self.setWindowTitle("Lantern · Local files, big screen")
         self.setWindowIcon(icon())
-        self.resize(1100, 800)
-        self.setMinimumSize(930, 720)
+        self.resize(1120, 800)
+        self.setMinimumSize(960, 720)
         self.library = Library(data / "library.sqlite3")
         self.worker = Worker(data / "cache")
         self.worker.event.connect(self.on_event)
@@ -216,15 +262,23 @@ class Window(QMainWindow):
         root = QWidget()
         self.setCentralWidget(root)
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(32, 24, 32, 24)
-        layout.setSpacing(18)
+        layout.setContentsMargins(28, 24, 28, 22)
+        layout.setSpacing(16)
         top = QHBoxLayout()
-        top.addWidget(label("◩  lantern", "brand"))
+        top.setSpacing(10)
+        monogram = QLabel()
+        monogram.setPixmap(icon().pixmap(32, 32))
+        monogram.setFixedSize(32, 32)
+        top.addWidget(monogram)
+        top.addWidget(label("lantern", "brand"))
         top.addStretch()
-        top.addWidget(label("LOCAL FILES. HOME NETWORK.", "section"))
+        top.addWidget(label("WINDOWS", "edition"))
         layout.addLayout(top)
-        layout.addWidget(label("Make room for movie night.", "hero"))
-        layout.addWidget(label("Add your files, choose a TV, and settle in.", "muted"))
+        intro = QVBoxLayout()
+        intro.setSpacing(5)
+        intro.addWidget(label("Your library. Bigger screen.", "hero"))
+        intro.addWidget(label("Pick a file. Choose your TV. Press play.", "muted"))
+        layout.addLayout(intro)
 
         connection = QWidget()
         connection.setObjectName("card")
@@ -243,6 +297,7 @@ class Window(QMainWindow):
         scan.clicked.connect(self.worker.scan)
         row.addWidget(scan)
         manual = QPushButton("Connect by IP")
+        manual.setObjectName("outline")
         manual.clicked.connect(self.manual_connect)
         row.addWidget(manual)
         layout.addWidget(connection)
@@ -252,9 +307,11 @@ class Window(QMainWindow):
         heading.addWidget(self.count)
         heading.addStretch()
         remove = QPushButton("Remove selected")
+        remove.setObjectName("quiet")
         remove.clicked.connect(self.remove_selected)
         heading.addWidget(remove)
         add = QPushButton("+ Add files")
+        add.setObjectName("outline")
         add.clicked.connect(self.choose_files)
         heading.addWidget(add)
         layout.addLayout(heading)
@@ -264,9 +321,7 @@ class Window(QMainWindow):
         self.queue.itemDoubleClicked.connect(lambda _: self.play_selected())
         self.queue.model().rowsMoved.connect(self.save_order)
         layout.addWidget(self.queue, 1)
-        self.empty = label("Drop video or audio files here to begin.\nYour originals stay exactly where they are.", "muted")
-        self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.empty)
+        self.empty = self.queue.placeholder
 
         subs = QHBoxLayout()
         subs.addWidget(label("Subtitles", "muted"))
@@ -287,7 +342,10 @@ class Window(QMainWindow):
         controls.setObjectName("card")
         controls_layout = QVBoxLayout(controls)
         controls_layout.setContentsMargins(20, 16, 20, 16)
-        self.now = label("Nothing playing yet", "now")
+        controls_layout.addWidget(label("PLAYBACK", "playerHeading"))
+        self.now = ElidedLabel("Nothing playing yet")
+        self.now.setObjectName("now")
+        self.now.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         controls_layout.addWidget(self.now)
         timeline = QHBoxLayout()
         self.elapsed = label("0:00", "muted")
@@ -326,7 +384,7 @@ class Window(QMainWindow):
         self.progress.setTextVisible(False)
         self.progress.setVisible(False)
         layout.addWidget(self.progress)
-        self.status = label("Ready · connect both devices to the same home network", "muted")
+        self.status = label("Ready · Local files. Home network. Bigger screen.", "status")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
 
@@ -338,8 +396,9 @@ class Window(QMainWindow):
         self.queue.clear()
         for media in self.library.items:
             suffix = Path(media.path).suffix[1:].upper()
-            item = QListWidgetItem(f"{media.title}\n{suffix}   ·   {'Original file unavailable' if not media.exists else Path(media.path).name}")
+            item = QListWidgetItem(f"{media.title}\n{'Original file unavailable' if not media.exists else Path(media.path).name}")
             item.setData(Qt.ItemDataRole.UserRole, media.id)
+            item.setData(int(Qt.ItemDataRole.UserRole) + 1, suffix)
             item.setToolTip(media.path)
             self.queue.addItem(item)
             if selected == media.id:
@@ -523,6 +582,7 @@ class Window(QMainWindow):
                 if self.selected_id() == media.id:
                     self.selection_changed()
             self.now.setText(media.title if media else "Nothing playing yet")
+            self.now.setToolTip(media.title if media else "")
             self.update_time()
         elif event == "error":
             self.busy = False
@@ -594,7 +654,7 @@ def main():
                 QFontDatabase.addApplicationFont(str(font_file))
     app.setApplicationName("Lantern TV")
     app.setStyle("Fusion")
-    app.setStyleSheet(STYLES)
+    apply_theme(app)
     lock = QLockFile(str(args.data_dir / "lantern.lock"))
     if not lock.tryLock(100):
         QMessageBox.information(None, "Lantern", "Lantern is already running. Open it from the system tray.")

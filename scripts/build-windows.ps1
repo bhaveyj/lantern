@@ -3,11 +3,13 @@ $projectRoot = Split-Path $PSScriptRoot -Parent
 Set-Location $projectRoot
 $env:TEMP = Join-Path $projectRoot '.tmp'
 $env:TMP = $env:TEMP
+& '.\.venv\Scripts\python.exe' scripts/generate_windows_icon.py
+if ($LASTEXITCODE) { throw 'Windows icon generation failed.' }
 $buildPath = $env:PATH
 try {
     # Keep unrelated native tools on the developer's PATH out of the frozen DLL set.
     $env:PATH = "$projectRoot\.venv\Scripts;$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\Wbem"
-    & '.\.venv\Scripts\python.exe' -m PyInstaller --noconfirm --clean --windowed --name Lantern --paths src --add-data '.tools/ffmpeg;tools' --recursive-copy-metadata lantern-tv scripts/desktop_entry.py
+    & '.\.venv\Scripts\python.exe' -m PyInstaller --noconfirm --clean --windowed --name Lantern --icon assets/lantern-windows.ico --paths src --add-data '.tools/ffmpeg;tools' --recursive-copy-metadata lantern-tv scripts/desktop_entry.py
 } finally { $env:PATH = $buildPath }
 if ($LASTEXITCODE) { throw 'Windows packaging failed.' }
 Get-ChildItem .venv/Lib/site-packages/PySide6 -File | Where-Object { $_.Name -match '^(MSVCP140|VCRUNTIME140|CONCRT140).*\.dll$' } | Copy-Item -Destination dist/Lantern/_internal -Force

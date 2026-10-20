@@ -15,6 +15,7 @@ Compression=lzma2/fast
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\Lantern.exe
+SetupIconFile=..\assets\lantern-windows.ico
 LicenseFile=..\LICENSE
 CloseApplications=yes
 
