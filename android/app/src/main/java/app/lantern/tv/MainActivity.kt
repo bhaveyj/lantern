@@ -12,10 +12,13 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.text.TextUtils
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
+import android.view.accessibility.CaptioningManager
 import android.widget.*
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -27,6 +30,7 @@ import androidx.media3.common.Tracks
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import androidx.media3.ui.SubtitleView
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.Inet4Address
@@ -58,9 +62,10 @@ class MainActivity : Activity() {
     private var registration: NsdManager.RegistrationListener? = null
     private var multicast: WifiManager.MulticastLock? = null
     private var connected = false
-    private val bg = Color.rgb(17, 37, 33)
-    private val ink = Color.rgb(237, 243, 233)
-    private val gold = Color.rgb(237, 183, 107)
+    private var captionFontScale = 1f
+    private val bg = TvTheme.background
+    private val ink = TvTheme.text
+    private val accent = TvTheme.blue
 
     private val ticker = object : Runnable {
         override fun run() {
@@ -69,7 +74,7 @@ class MainActivity : Activity() {
             handler.postDelayed(this, 1000)
         }
     }
-    private val hideControls = Runnable { if (player.isPlaying && drawer == null) controls.visibility = View.GONE }
+    private val hideControls = Runnable { if (player.isPlaying && drawer == null) setControlsVisible(false) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -106,12 +111,12 @@ class MainActivity : Activity() {
                 current = null
                 items = emptyList()
                 welcome.visibility = View.VISIBLE
-                controls.visibility = View.GONE
+                setControlsVisible(false)
                 drawer?.let { root.removeView(it) }; drawer = null
             }
         } })
         try {
-            // Sender pings every 20 seconds; NanoHTTPD's default 5-second read timeout is too short.
+            // Sender pings every 10 seconds; NanoHTTPD's default 5-second read timeout is too short.
             server.start(30000, false)
             advertise()
         } catch (error: Exception) {
@@ -122,43 +127,79 @@ class MainActivity : Activity() {
 
     private fun text(value: String, size: Float, color: Int = ink): TextView = TextView(this).apply {
         text = value; textSize = size; setTextColor(color); gravity = Gravity.CENTER
+        includeFontPadding = false
         setPadding(dp(8), dp(6), dp(8), dp(6))
     }
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
-    private fun button(value: String, clicked: () -> Unit): Button = Button(this).apply {
+    private fun shape(color: Int, stroke: Int = TvTheme.border, radius: Int = 14, width: Int = 1) = GradientDrawable().apply {
+        setColor(color)
+        cornerRadius = dp(radius).toFloat()
+        setStroke(dp(width), stroke)
+    }
+    private fun button(value: String, primary: Boolean = false, clicked: () -> Unit): Button = Button(this).apply {
         text = value; textSize = 14f; isAllCaps = false; setTextColor(ink)
+        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+        includeFontPadding = false
+        setPadding(dp(14), dp(8), dp(14), dp(8))
+        backgroundTintList = null
+        stateListAnimator = null
+        minimumWidth = dp(68); minimumHeight = dp(48)
+        val focusStyle: (Boolean) -> Unit = { focused ->
+            background = shape(
+                if (primary) { if (focused) TvTheme.blueHover else accent } else { if (focused) TvTheme.blueSurface else TvTheme.raised },
+                if (focused) { if (primary) Color.rgb(189, 215, 255) else accent } else { if (primary) accent else TvTheme.border },
+                8, if (focused) 2 else 1
+            )
+            scaleX = if (focused) 1.04f else 1f
+            scaleY = if (focused) 1.04f else 1f
+        }
         setOnClickListener { clicked(); scheduleHide() }
-        setOnFocusChangeListener { _, focused -> setTextColor(if (focused) bg else ink); backgroundTintList = android.content.res.ColorStateList.valueOf(if (focused) gold else Color.rgb(40, 70, 58)) }
-        backgroundTintList = android.content.res.ColorStateList.valueOf(Color.rgb(40, 70, 58))
-        minimumWidth = dp(62)
+        setOnFocusChangeListener { _, focused -> focusStyle(focused) }
+        focusStyle(false)
     }
 
     private fun createUi() {
         root = FrameLayout(this).apply { setBackgroundColor(bg) }
         setContentView(root)
         playerView = PlayerView(this).apply { player = this@MainActivity.player; useController = false }
+        val captions = getSystemService(CAPTIONING_SERVICE) as? CaptioningManager
+        captionFontScale = if (captions?.isEnabled == true) captions.fontScale else 1f
+        playerView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> if (::controls.isInitialized) updateCaptionInset() }
         root.addView(playerView, FrameLayout.LayoutParams(-1, -1))
-        welcome = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(dp(50), dp(30), dp(50), dp(30)); setBackgroundColor(bg) }
-        welcome.addView(text("◩  lantern", 30f, gold).apply { typeface = Typeface.DEFAULT_BOLD })
-        welcome.addView(text("Your next movie night starts here.", 28f).apply { setPadding(0, dp(20), 0, dp(8)) })
-        welcome.addView(text("Enter this code in Lantern on your Windows PC", 17f, Color.LTGRAY))
-        pinView = text(gate.pin.chunked(3).joinToString("  "), 58f, gold).apply { typeface = Typeface.MONOSPACE }
-        welcome.addView(pinView)
-        connectionView = text("Open Lantern on Windows to connect.", 16f)
-        welcome.addView(connectionView)
-        welcomeBrowse = button("Browse your playlist") { showPlaylist() }.apply { visibility = View.GONE }
-        welcome.addView(welcomeBrowse)
-        welcome.addView(text("Same home network  ·  Connect by IP: ${ipAddress()}:8765", 14f, Color.LTGRAY))
+        welcome = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(40), dp(24), dp(40), dp(20)); setBackgroundColor(bg) }
+        val brand = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        brand.addView(ImageView(this).apply { setImageResource(app.lantern.tv.R.drawable.lantern_icon); contentDescription = "Lantern" }, LinearLayout.LayoutParams(dp(38), dp(38)))
+        brand.addView(text("lantern", 25f).apply { typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.START }, LinearLayout.LayoutParams(0, -2, 1f))
+        brand.addView(text("TV", 11f, accent).apply { typeface = Typeface.DEFAULT_BOLD; setPadding(dp(14), dp(7), dp(14), dp(7)); background = shape(TvTheme.blueSurface, radius = 7) })
+        welcome.addView(brand, LinearLayout.LayoutParams(-1, dp(44)))
+        val pairing = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER }
+        val compact = resources.configuration.screenHeightDp < 600
+        pairing.addView(text("Your library. Bigger screen.", if (compact) 28f else 32f).apply { typeface = Typeface.DEFAULT_BOLD })
+        pairing.addView(text("Enter the code below in Lantern on your Windows PC.", 15f, TvTheme.muted))
+        val codeCard = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(dp(22), dp(16), dp(22), dp(16)); background = shape(TvTheme.surface, radius = 18) }
+        codeCard.addView(text("PAIR YOUR TV", 11f, accent).apply { typeface = Typeface.DEFAULT_BOLD; letterSpacing = 0.12f })
+        pinView = text(gate.pin.chunked(3).joinToString("  "), if (compact) 60f else 68f, accent).apply { typeface = Typeface.MONOSPACE; setPadding(0, dp(6), 0, dp(6)) }
+        codeCard.addView(pinView)
+        connectionView = text("Ready to connect to your laptop.", 14f, TvTheme.muted)
+        codeCard.addView(connectionView)
+        welcomeBrowse = button("Browse your playlist", primary = true) { showPlaylist() }.apply { visibility = View.GONE; textSize = 16f }
+        codeCard.addView(welcomeBrowse, LinearLayout.LayoutParams(dp(260), dp(48)).apply { topMargin = dp(10) })
+        pairing.addView(codeCard, LinearLayout.LayoutParams(dp(520), -2).apply { topMargin = dp(16) })
+        welcome.addView(pairing, LinearLayout.LayoutParams(-1, 0, 1f))
+        welcome.addView(text("Same home network  ·  Connect by IP: ${ipAddress()}:8765", 13f, TvTheme.muted))
         root.addView(welcome, FrameLayout.LayoutParams(-1, -1))
 
-        controls = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(24), dp(12), dp(24), dp(18)); setBackgroundColor(Color.argb(235, 17, 37, 33)); visibility = View.GONE }
-        titleView = text("Ready", 20f).apply { gravity = Gravity.START }
+        controls = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(12), dp(20), dp(16)); background = shape(Color.argb(242, 14, 18, 26), radius = 16); visibility = View.GONE }
+        controls.addView(text("PLAYBACK", 11f, accent).apply { gravity = Gravity.START; typeface = Typeface.DEFAULT_BOLD })
+        titleView = text("Ready", 20f).apply { gravity = Gravity.START; maxLines = 2; ellipsize = TextUtils.TruncateAt.END }
         controls.addView(titleView)
         val timelineRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         timeline = SeekBar(this).apply {
             max = 1000
-            progressTintList = android.content.res.ColorStateList.valueOf(gold)
-            thumbTintList = android.content.res.ColorStateList.valueOf(gold)
+            progressTintList = android.content.res.ColorStateList.valueOf(accent)
+            thumbTintList = android.content.res.ColorStateList.valueOf(accent)
+            progressBackgroundTintList = android.content.res.ColorStateList.valueOf(TvTheme.border)
             keyProgressIncrement = 10
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onStartTrackingTouch(seekBar: SeekBar) { changingSeek = true }
@@ -167,21 +208,25 @@ class MainActivity : Activity() {
             })
         }
         timelineRow.addView(timeline, LinearLayout.LayoutParams(0, dp(40), 1f))
-        times = text("0:00 / 0:00", 13f)
+        times = text("0:00 / 0:00", 13f, TvTheme.muted)
         timelineRow.addView(times)
         controls.addView(timelineRow)
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
         row.addView(button("Previous") { requestAdjacent(-1) })
         row.addView(button("−10s") { player.seekTo((player.currentPosition - 10000).coerceAtLeast(0)) })
-        playButton = button("Pause") { if (player.isPlaying) player.pause() else resumePlayback() }
+        playButton = button("Pause", primary = true) { if (player.isPlaying) player.pause() else resumePlayback() }
         row.addView(playButton)
         row.addView(button("+10s") { player.seekTo(player.currentPosition + 10000) })
         row.addView(button("Next") { requestAdjacent(1) })
         row.addView(button("Playlist") { showPlaylist() })
         row.addView(button("CC") { showSubtitles() })
         row.addView(button("Fit / Fill") { playerView.resizeMode = if (playerView.resizeMode == AspectRatioFrameLayout.RESIZE_MODE_FIT) AspectRatioFrameLayout.RESIZE_MODE_ZOOM else AspectRatioFrameLayout.RESIZE_MODE_FIT })
-        controls.addView(row)
-        root.addView(controls, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
+        for (index in 0 until row.childCount) {
+            row.getChildAt(index).layoutParams = LinearLayout.LayoutParams(-2, dp(48)).apply { marginStart = dp(4); marginEnd = dp(4) }
+        }
+        controls.addView(row, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        root.addView(controls, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM).apply { setMargins(dp(20), 0, dp(20), dp(20)) })
+        controls.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateCaptionInset() }
     }
 
     private fun handle(message: JSONObject) {
@@ -195,7 +240,7 @@ class MainActivity : Activity() {
             "playback.command" -> when (message.optString("action")) {
                 "play" -> resumePlayback()
                 "pause" -> { player.pause(); showControls() }
-                "stop" -> { player.stop(); current = null; welcome.visibility = View.VISIBLE; controls.visibility = View.GONE }
+                "stop" -> { player.stop(); current = null; welcome.visibility = View.VISIBLE; setControlsVisible(false) }
                 "seek" -> player.seekTo((message.optDouble("value", 0.0).coerceAtLeast(0.0) * 1000).toLong())
                 "volume" -> player.volume = message.optDouble("value", 0.8).toFloat().coerceIn(0f, 1f)
                 "next" -> requestAdjacent(1)
@@ -262,17 +307,18 @@ class MainActivity : Activity() {
 
     private fun showDrawer(title: String, options: List<Pair<String, () -> Unit>>) {
         closeDrawer()
-        val panel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(30), dp(20), dp(30), dp(20)); setBackgroundColor(bg) }
-        panel.addView(text(title, 25f, gold))
+        val panel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(22), dp(18), dp(22), dp(18)); background = shape(TvTheme.surface, radius = 16) }
+        panel.addView(text("ON THIS TV", 11f, accent).apply { gravity = Gravity.START; typeface = Typeface.DEFAULT_BOLD; letterSpacing = 0.1f })
+        panel.addView(text(title, 25f).apply { gravity = Gravity.START; typeface = Typeface.DEFAULT_BOLD; setPadding(dp(8), dp(8), dp(8), dp(16)) })
         val scroll = ScrollView(this)
         val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        options.forEach { (name, action) -> list.addView(button(name, action), LinearLayout.LayoutParams(-1, dp(60))) }
-        if (options.isEmpty()) list.addView(text("Add some files on your PC.", 18f))
+        options.forEach { (name, action) -> list.addView(button(name, clicked = action).apply { textSize = 16f; gravity = Gravity.START or Gravity.CENTER_VERTICAL }, LinearLayout.LayoutParams(-1, dp(58)).apply { setMargins(dp(8), dp(5), dp(8), dp(5)) }) }
+        if (options.isEmpty()) list.addView(text("Add some files on your PC.", 17f, TvTheme.muted))
         scroll.addView(list)
         panel.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
-        panel.addView(button("Back to video") { closeDrawer() })
+        panel.addView(button("Back to video") { closeDrawer() }, LinearLayout.LayoutParams(-1, dp(48)).apply { topMargin = dp(12) })
         drawer = panel
-        root.addView(panel, FrameLayout.LayoutParams(dp(440), -1, Gravity.END))
+        root.addView(panel, FrameLayout.LayoutParams(dp(440), -1, Gravity.END).apply { setMargins(0, dp(20), dp(20), dp(20)) })
         list.getChildAt(0)?.requestFocus()
     }
 
@@ -283,7 +329,21 @@ class MainActivity : Activity() {
         scheduleHide()
     }
 
-    private fun showControls() { controls.visibility = View.VISIBLE; playButton.requestFocus(); scheduleHide() }
+    private fun updateCaptionInset() {
+        playerView.subtitleView?.let { captions ->
+            // Use the full video surface, not the smaller padded subtitle canvas.
+            // This keeps the user's caption size stable while the HUD is visible.
+            if (playerView.height > 0) captions.setFixedTextSize(TypedValue.COMPLEX_UNIT_PX, playerView.height * SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * captionFontScale)
+            val inset = if (controls.visibility == View.VISIBLE) controls.height + dp(20) else 0
+            if (captions.paddingBottom != inset) captions.setPadding(captions.paddingLeft, captions.paddingTop, captions.paddingRight, inset)
+        }
+    }
+    private fun setControlsVisible(visible: Boolean) {
+        controls.visibility = if (visible) View.VISIBLE else View.GONE
+        updateCaptionInset()
+        if (visible) controls.post { updateCaptionInset() }
+    }
+    private fun showControls() { setControlsVisible(true); playButton.requestFocus(); scheduleHide() }
     private fun scheduleHide() { handler.removeCallbacks(hideControls); handler.postDelayed(hideControls, 8000) }
 
     private fun updateState() {
@@ -300,7 +360,7 @@ class MainActivity : Activity() {
             when (event.keyCode) {
                 KeyEvent.KEYCODE_BACK -> {
                     if (drawer != null) { closeDrawer(); return true }
-                    if (controls.visibility == View.VISIBLE && current != null) { controls.visibility = View.GONE; return true }
+                    if (controls.visibility == View.VISIBLE && current != null) { setControlsVisible(false); return true }
                 }
                 KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> if (controls.visibility != View.VISIBLE && current != null && drawer == null) { showControls(); return true }
                 KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> { if (player.isPlaying) player.pause() else resumePlayback(); return true }

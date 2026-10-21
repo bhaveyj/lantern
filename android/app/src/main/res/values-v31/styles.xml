@@ -1,0 +1,7 @@
+<resources>
+    <style name="LanternTheme" parent="LanternBaseTheme">
+        <item name="android:windowSplashScreenBackground">#07090D</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/lantern_icon</item>
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+</resources>

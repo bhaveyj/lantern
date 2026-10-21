@@ -1,0 +1,15 @@
+<resources>
+    <style name="LanternBaseTheme" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#07090D</item>
+        <item name="android:colorAccent">#3984FF</item>
+        <item name="android:colorControlActivated">#3984FF</item>
+        <item name="android:colorControlHighlight">#403984FF</item>
+        <item name="android:colorButtonNormal">#141B27</item>
+        <item name="android:textColorPrimary">#EDF3FF</item>
+        <item name="android:textColorSecondary">#8C9AB0</item>
+        <item name="android:statusBarColor">#07090D</item>
+        <item name="android:navigationBarColor">#07090D</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+    <style name="LanternTheme" parent="LanternBaseTheme" />
+</resources>
