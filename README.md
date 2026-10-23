@@ -144,7 +144,7 @@ The device smoke test defaults to a 90-second playback hold and writes its local
 
 The UI accepts common video containers including MP4, M4V, MOV, MKV, WebM, AVI, MPEG, MPG, TS, and M2TS, plus audio formats including MP3, M4A, AAC, FLAC, WAV, and OGG. Actual playback is determined by the receiver's decoders and the codecs inside the container.
 
-Lantern probes media with FFmpeg/ffprobe. AVI is remuxed when its video is compatible. When the receiver cannot decode the source audio but the video is H.264 or HEVC, Lantern copies the video into a temporary MP4 and produces stereo AAC audio. Unsupported video is reported instead of being transcoded. Prepared files use a 10 GiB session quota and leave at least 1 GiB free on the volume. Stopping, disconnecting, or quitting removes prepared session files.
+Lantern probes media with FFmpeg/ffprobe and caches inspection results until the file changes. Compatible H.264/stereo-AAC MP4 files and MP3 audio stream directly to Cast. Files that only need a container change are remuxed with compatible AAC audio preserved; unsupported audio is converted to stereo AAC while H.264 or HEVC video is copied. Unsupported video is reported instead of being transcoded. Prepared files use a 10 GiB session quota and leave at least 1 GiB free on the volume. Stopping, disconnecting, or quitting removes prepared session files.
 
 SRT and WebVTT files are discovered when they share a base name with the video or live in a neighboring `Subs` or `Subtitles` directory. A subtitle can also be selected manually. The custom receiver can switch external tracks during playback; Cast applies the selected subtitle when the item is played again.
 

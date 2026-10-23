@@ -34,12 +34,15 @@ class Probe:
     audio: str | None
     duration: float
     container: str
+    channels: int | None = None
+    video_index: int | None = None
+    audio_index: int | None = None
 
 
 async def probe(path: Path) -> Probe:
     process = await asyncio.create_subprocess_exec(tool_path("ffprobe"), "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, creationflags=CREATE_NO_WINDOW)
     try:
-        output, error = await process.communicate()
+        output, error = await asyncio.wait_for(process.communicate(), timeout=30)
     finally:
         if process.returncode is None:
             process.kill()
@@ -48,16 +51,39 @@ async def probe(path: Path) -> Probe:
         raise RuntimeError(error.decode(errors="replace").strip() or "Could not inspect this media file.")
     data = json.loads(output)
     streams = data.get("streams", [])
-    return Probe(next((s["codec_name"] for s in streams if s["codec_type"] == "video" and not s.get("disposition", {}).get("attached_pic")), None), next((s["codec_name"] for s in streams if s["codec_type"] == "audio"), None), float(data.get("format", {}).get("duration", 0)), data.get("format", {}).get("format_name", ""))
+    video = next((s for s in streams if s["codec_type"] == "video" and not s.get("disposition", {}).get("attached_pic")), {})
+    audio = next((s for s in streams if s["codec_type"] == "audio"), {})
+    return Probe(video.get("codec_name"), audio.get("codec_name"), float(data.get("format", {}).get("duration", 0)), data.get("format", {}).get("format_name", ""), audio.get("channels"), video.get("index"), audio.get("index"))
+
+
+@dataclass(frozen=True)
+class MediaPlan:
+    mode: str  # direct, remux, or audio conversion
+    mime_type: str
+
+
+def playback_plan(info: Probe, cast: bool, audio_mimes: list[str], suffix: str) -> MediaPlan:
+    suffix = suffix.lower()
+    if cast:
+        stereo_aac = info.audio is None or (info.audio == "aac" and (info.channels is None or info.channels <= 2))
+        if suffix in {".mp4", ".m4v", ".m4a"} and info.video in {None, "h264"} and stereo_aac:
+            return MediaPlan("direct", "video/mp4" if info.video else "audio/mp4")
+        if info.video is None and info.audio == "mp3" and suffix == ".mp3":
+            return MediaPlan("direct", "audio/mpeg")
+        return MediaPlan("remux" if stereo_aac else "audio", "video/mp4" if info.video else "audio/mp4")
+    audio_aliases = {"aac": "audio/mp4a-latm", "ac3": "audio/ac3", "eac3": "audio/eac3", "dts": "audio/vnd.dts", "truehd": "audio/true-hd", "mp3": "audio/mpeg", "flac": "audio/flac", "opus": "audio/opus", "vorbis": "audio/vorbis"}
+    audio_mime = "audio/raw" if (info.audio or "").startswith("pcm_") else audio_aliases.get(info.audio, "")
+    unsupported_audio = info.audio is not None and audio_mime not in audio_mimes
+    if unsupported_audio:
+        return MediaPlan("audio", "video/mp4" if info.video else "audio/mp4")
+    if suffix == ".avi":
+        return MediaPlan("remux" if info.audio in {None, "aac"} else "audio", "video/mp4")
+    types = {".mkv": "video/x-matroska", ".webm": "video/webm", ".mp3": "audio/mpeg", ".wav": "audio/wav", ".flac": "audio/flac", ".ogg": "audio/ogg", ".aac": "audio/aac", ".m4a": "audio/mp4", ".ts": "video/mp2t", ".m2ts": "video/mp2t"}
+    return MediaPlan("direct", types.get(suffix, "video/mp4" if info.video else "audio/mp4"))
 
 
 def needs_preparation(info: Probe, cast: bool, audio_mimes: list[str], suffix: str) -> bool:
-    if cast:
-        return True
-    audio_aliases = {"aac": "audio/mp4a-latm", "ac3": "audio/ac3", "eac3": "audio/eac3", "dts": "audio/vnd.dts", "truehd": "audio/true-hd", "mp3": "audio/mpeg", "flac": "audio/flac", "opus": "audio/opus", "vorbis": "audio/vorbis"}
-    unsupported_audio = info.audio is not None and audio_aliases.get(info.audio, "") not in audio_mimes
-    # AVI is not a Media3 progressive container. Normalize compatible streams.
-    return unsupported_audio or suffix.lower() == ".avi"
+    return playback_plan(info, cast, audio_mimes, suffix).mode != "direct"
 
 
 class Preparation:
@@ -85,15 +111,15 @@ class Preparation:
             if self.cleanup():
                 return
 
-    async def prepare(self, path: Path, info: Probe, progress: Callable[[float], None]) -> Path:
+    async def prepare(self, path: Path, info: Probe, progress: Callable[[float], None], *, copy_audio: bool = False) -> Path:
         async with self._lock:
-            return await self._prepare(path, info, progress)
+            return await self._prepare(path, info, progress, copy_audio=copy_audio)
 
-    async def _prepare(self, path: Path, info: Probe, progress: Callable[[float], None]) -> Path:
+    async def _prepare(self, path: Path, info: Probe, progress: Callable[[float], None], *, copy_audio: bool = False) -> Path:
         if info.video and info.video not in {"h264", "hevc"}:
             raise ValueError(f"This route cannot play {info.video.upper()} video. Use H.264 or HEVC; video conversion is not included.")
         stat = path.stat()
-        key = hashlib.sha256(f"{path}:{stat.st_size}:{stat.st_mtime_ns}".encode()).hexdigest()[:24]
+        key = hashlib.sha256(f"v2:{path}:{stat.st_size}:{stat.st_mtime_ns}:{copy_audio}".encode()).hexdigest()[:24]
         destination = self.cache / f"{key}.mp4"
         if destination.is_file():
             return destination
@@ -104,7 +130,11 @@ class Preparation:
             raise ValueError("Preparing this file would exceed the 10 GiB session cache. Stop the session to clear it, or use the TV receiver directly.")
         if shutil.disk_usage(self.cache).free < estimated + GIB:
             raise ValueError("There is not enough free space to prepare this file and leave 1 GiB available.")
-        args = [tool_path("ffmpeg"), "-hide_banner", "-loglevel", "error", "-y", "-i", str(path), "-map", "0:v:0?", "-map", "0:a:0?", "-c:v", "copy", "-c:a", "aac", "-ac", "2", "-b:a", "192k", "-sn", "-movflags", "+faststart", "-progress", "pipe:1", "-f", "mp4", str(partial)]
+        video_map = f"0:{info.video_index}" if info.video_index is not None else "0:v:0?"
+        audio_map = f"0:{info.audio_index}" if info.audio_index is not None else "0:a:0?"
+        maps = (["-map", video_map] if info.video else []) + (["-map", audio_map] if info.audio else [])
+        audio_args = ["-c:a", "copy"] if copy_audio else ["-c:a", "aac", "-ac", "2", "-b:a", "192k"]
+        args = [tool_path("ffmpeg"), "-hide_banner", "-loglevel", "error", "-y", "-i", str(path), *maps, "-c:v", "copy", *audio_args, "-sn", "-movflags", "+faststart", "-progress", "pipe:1", "-f", "mp4", str(partial)]
         self.process = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, creationflags=CREATE_NO_WINDOW)
         process = self.process
         stderr = asyncio.create_task(process.stderr.read())

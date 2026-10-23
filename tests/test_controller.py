@@ -88,7 +88,7 @@ async def test_cast_starts_without_active_session_and_polls(monkeypatch, tmp_pat
     async def fake_probe(path): return Probe("h264", "aac", 45, "mp4")
     monkeypatch.setattr("lantern.controller.probe", fake_probe)
     controller = Controller(tmp_path / "cache", lambda *args: None)
-    async def fake_prepare(path, info, progress): return path
+    async def fake_prepare(path, info, progress, **kwargs): return path
     monkeypatch.setattr(controller.preparation, "prepare", fake_prepare)
     source = tmp_path / "movie.mp4"
     source.touch()
@@ -292,7 +292,7 @@ def cast_playback(monkeypatch):
 
 async def cast_controller(tmp_path, monkeypatch, count):
     controller = Controller(tmp_path / "cache", lambda *args: None)
-    async def prepare(path, info, progress): return path
+    async def prepare(path, info, progress, **kwargs): return path
     monkeypatch.setattr(controller.preparation, "prepare", prepare)
     items = []
     for index in range(count):
@@ -439,3 +439,28 @@ def test_legacy_receiver_subtitle_state_is_supported(tmp_path):
     controller.playlist = [{"id": "movie", "subtitles": [{"id": "english"}], "selected_subtitle": None}]
     controller.receiver_state({"id": "movie", "subtitleId": "english"})
     assert controller.playlist[0]["selected_subtitle"] == "english"
+
+
+async def test_direct_cast_playback_caches_probe_and_invalidates_changed_files(tmp_path, monkeypatch):
+    controller = Controller(tmp_path / "cache", lambda *args: None)
+    controller.device = Device("cast", "TV", "127.0.0.1", 8009, "cast")
+    source = tmp_path / "movie.mp4"
+    source.write_bytes(b"source")
+    item = {"id": "movie", "path": str(source), "title": "Movie"}
+    probes = []
+    async def probe(path):
+        probes.append(path)
+        return Probe("h264", "aac", 10, "mp4", 2)
+    async def unexpected_preparation(*args, **kwargs):
+        pytest.fail("Compatible MP4 must stream directly")
+    monkeypatch.setattr("lantern.controller.probe", probe)
+    monkeypatch.setattr("lantern.controller.local_address", lambda host: "127.0.0.1")
+    monkeypatch.setattr(controller.preparation, "prepare", unexpected_preparation)
+    await controller.prepared_url(item, True)
+    await controller.prepared_url(item, True)
+    assert len(probes) == 1
+    assert controller.server.files["movie"] == source
+    assert controller.mime_types["movie"] == "video/mp4"
+    source.write_bytes(b"changed source")
+    await controller.prepared_url(item, True)
+    assert len(probes) == 2

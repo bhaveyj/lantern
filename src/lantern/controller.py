@@ -6,6 +6,7 @@ import ipaddress
 import logging
 import socket
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -15,7 +16,7 @@ import aiohttp
 import pychromecast
 from zeroconf import ServiceBrowser, ServiceListener, Zeroconf
 
-from .media import Preparation, needs_preparation, probe
+from .media import Preparation, playback_plan, probe
 from .server import MediaServer
 
 RECEIVER_PING_INTERVAL = 10.0
@@ -119,6 +120,7 @@ class Controller:
         self._cast_load_result: asyncio.Future | None = None
         self._pending_cast_id: str | None = None
         self._subtitle_revisions: dict[str, int] = {}
+        self._probe_cache = OrderedDict()
 
     async def cast_call(self, function, *args, **kwargs):
         task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
@@ -315,11 +317,20 @@ class Controller:
         path = Path(item["path"])
         if not path.is_file():
             raise ValueError(f"The original file is no longer available: {path.name}")
-        info = await probe(path)
-        self.mime_types[item["id"]] = "video/mp4" if info.video else "audio/mp4"
-        if needs_preparation(info, cast, self.audio_mimes, path.suffix):
+        stat = path.stat()
+        key = (str(path), stat.st_size, stat.st_mtime_ns)
+        info = self._probe_cache.get(key)
+        if info is None:
+            info = await probe(path)
+            self._probe_cache[key] = info
+            if len(self._probe_cache) > 256:
+                self._probe_cache.popitem(last=False)
+        self._probe_cache.move_to_end(key)
+        plan = playback_plan(info, cast, self.audio_mimes, path.suffix)
+        self.mime_types[item["id"]] = plan.mime_type
+        if plan.mode != "direct":
             self.emit("status", {"message": f"Preparing {item['title']}…", "busy": True})
-            path = await self.preparation.prepare(path, info, lambda percent: self.emit("progress", {"percent": percent, "title": item["title"]}))
+            path = await self.preparation.prepare(path, info, lambda percent: self.emit("progress", {"percent": percent, "title": item["title"]}), copy_audio=plan.mode == "remux")
         self.server.files[item["id"]] = path
         return self.server.url(local_address(self.device.host), item["id"]), info.duration
 
