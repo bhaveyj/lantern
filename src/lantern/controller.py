@@ -94,6 +94,7 @@ class Controller:
         self.audio_mimes: list[str] = []
         self.current_id: str | None = None
         self.current_position = 0.0
+        self.playing = False
         self.loop: asyncio.AbstractEventLoop | None = None
         self.cast_enqueued: set[str] = set()
         self.cast_loaded = False
@@ -142,8 +143,17 @@ class Controller:
         if self.ws and not self.ws.closed:
             await self.send({"type": "playlist.snapshot", "items": self.wire_playlist()})
         if self.cast and self.current_id and old_order != [m["id"] for m in self.playlist]:
-            if self.current_id in {m["id"] for m in self.playlist}:
-                self.queue_play(self.current_id, self.current_position)
+            new_order = [m["id"] for m in self.playlist]
+            if self.current_id in new_order:
+                old_index = old_order.index(self.current_id) if self.current_id in old_order else -1
+                new_index = new_order.index(self.current_id)
+                old_next = old_order[old_index + 1] if 0 <= old_index < len(old_order) - 1 else None
+                new_next = new_order[new_index + 1] if new_index + 1 < len(new_order) else None
+                if old_next != new_next:
+                    if old_next in self.cast_enqueued:
+                        self.queue_play(self.current_id, self.current_position, autoplay=self.playing)
+                    else:
+                        self.preload_task = self.playback_task(self.preload_next(self.current_id))
 
     def wire_playlist(self) -> list[dict]:
         if not self.device:
@@ -215,6 +225,7 @@ class Controller:
                 if data.get("type") == "playback.state":
                     self.current_id = data.get("id")
                     self.current_position = data.get("position", 0)
+                    self.playing = data.get("playing", False)
                     self.emit("state", data)
                 elif data.get("type") == "request.play":
                     self.queue_play(data["id"])
@@ -229,16 +240,16 @@ class Controller:
                 logger.info("TV control connection closed (code %s)", ws.close_code)
                 asyncio.create_task(self.disconnect(expected_ws=ws))
 
-    def queue_play(self, media_id: str, position: float = 0):
+    def queue_play(self, media_id: str, position: float = 0, *, autoplay: bool = True):
         if self.play_task and not self.play_task.done() and not self.play_task.cancelling():
             self.play_task.cancel()
         if self.preload_task and not self.preload_task.done() and not self.preload_task.cancelling():
             self.preload_task.cancel()
-        self.play_task = self.playback_task(self.guarded_play(media_id, position))
+        self.play_task = self.playback_task(self.guarded_play(media_id, position, autoplay=autoplay))
 
-    async def guarded_play(self, media_id: str, position: float = 0):
+    async def guarded_play(self, media_id: str, position: float = 0, *, autoplay: bool = True):
         try:
-            await self.play(media_id, position)
+            await self.play(media_id, position, autoplay=autoplay)
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -259,7 +270,7 @@ class Controller:
         self.server.files[item["id"]] = path
         return self.server.url(local_address(self.device.host), item["id"]), info.duration
 
-    async def play(self, media_id: str, position: float = 0):
+    async def play(self, media_id: str, position: float = 0, *, autoplay: bool = True):
         task = asyncio.current_task()
         self._playback_tasks.add(task)
         try:
@@ -268,11 +279,11 @@ class Controller:
                     self.preload_task.cancel()
                 await asyncio.gather(self.preload_task, return_exceptions=True)
             async with self._operation_lock:
-                await self._play(media_id, position)
+                await self._play(media_id, position, autoplay=autoplay)
         finally:
             self._playback_tasks.discard(task)
 
-    async def _play(self, media_id: str, position: float = 0):
+    async def _play(self, media_id: str, position: float = 0, *, autoplay: bool = True):
         if not self.device:
             raise ValueError("Connect to your TV first.")
         item = next(m for m in self.playlist if m["id"] == media_id)
@@ -281,7 +292,7 @@ class Controller:
         self.current_position = position
         if self.device.kind == "receiver":
             wire = next(m for m in self.wire_playlist() if m["id"] == media_id)
-            wire.update(url=url, duration=duration)
+            wire.update(url=url, duration=duration, position=position, autoplay=autoplay)
             await self.send({"type": "playback.load", "item": wire})
         else:
             self.cast_enqueued = {media_id}
@@ -289,18 +300,19 @@ class Controller:
             self.cast_finished_id = None
             if self.cast.media_controller.status.media_session_id is not None:
                 await asyncio.to_thread(self.cast.media_controller.stop)
-            await self.cast_load(item, url, False, position)
+            await self.cast_load(item, url, False, position, autoplay=autoplay)
             self.cast_loaded = True
             await asyncio.to_thread(self.cast.media_controller.block_until_active, 15)
             if not self.cast.media_controller.session_active_event.is_set():
                 raise RuntimeError("The Cast receiver did not start. Check that Google Cast is enabled on the TV.")
             self.preload_task = self.playback_task(self.preload_next(media_id))
-        self.emit("state", {"id": media_id, "playing": True, "position": position, "duration": duration})
+        self.playing = autoplay
+        self.emit("state", {"id": media_id, "playing": autoplay, "position": position, "duration": duration})
 
-    async def cast_load(self, item: dict, url: str, enqueue: bool, position: float = 0):
+    async def cast_load(self, item: dict, url: str, enqueue: bool, position: float = 0, *, autoplay: bool = True):
         sub = next((s for s in item["subtitles"] if s["id"] == item.get("selected_subtitle")), None)
         subtitle_url = self.server.subtitle_url(local_address(self.device.host), sub["id"]) if sub else None
-        await asyncio.to_thread(self.cast.media_controller.play_media, url, self.mime_types.get(item["id"], "video/mp4"), title=item["title"], stream_type="BUFFERED", subtitles=subtitle_url, subtitles_mime="text/vtt", enqueue=enqueue, current_time=position)
+        await asyncio.to_thread(self.cast.media_controller.play_media, url, self.mime_types.get(item["id"], "video/mp4"), title=item["title"], stream_type="BUFFERED", subtitles=subtitle_url, subtitles_mime="text/vtt", enqueue=enqueue, current_time=position, autoplay=autoplay)
 
     async def preload_next(self, media_id: str):
         async with self._operation_lock:
@@ -342,6 +354,7 @@ class Controller:
             changed = self.current_id != data["id"]
             self.current_id = data["id"]
             self.current_position = data["position"]
+            self.playing = data["playing"]
             self.emit("state", data)
             if changed:
                 self.preload_task = self.playback_task(self.preload_next(self.current_id))
@@ -394,6 +407,7 @@ class Controller:
             self.server.reset()
             self.current_id = None
             self.current_position = 0
+            self.playing = False
             self.cast_enqueued.clear()
             await self.preparation.cleanup_async()
             for item in self.playlist:

@@ -166,7 +166,7 @@ async def test_replacement_play_waits_for_cancelled_job_cleanup(monkeypatch, tmp
     cleaning = asyncio.Event()
     release_cleanup = asyncio.Event()
 
-    async def play(media_id, position=0):
+    async def play(media_id, position=0, **kwargs):
         events.append(media_id)
         if media_id == "first":
             started.set()
@@ -255,3 +255,83 @@ async def test_old_receiver_disconnect_does_not_close_replacement(monkeypatch, t
     monkeypatch.setattr(controller, "_disconnect", unexpected_disconnect)
     await controller.disconnect(expected_ws=old)
     assert controller.ws is current
+
+
+@pytest.fixture
+def cast_playback(monkeypatch):
+    class FakeMedia:
+        def __init__(self):
+            self.status = SimpleNamespace(media_session_id=None, content_id=None, player_state="UNKNOWN",
+                                          current_time=0, duration=45, idle_reason=None)
+            self.session_active_event = threading.Event()
+            self.loads = []
+        def register_status_listener(self, listener): self.listener = listener
+        def play_media(self, url, mime, **kwargs):
+            self.loads.append((url, kwargs))
+            if not kwargs.get("enqueue"):
+                self.status.media_session_id = 1
+                self.status.content_id = url
+                self.status.player_state = "PLAYING" if kwargs.get("autoplay", True) else "PAUSED"
+                self.status.current_time = kwargs.get("current_time", 0)
+                self.session_active_event.set()
+                self.listener.new_media_status(self.status)
+        def block_until_active(self, timeout): assert self.session_active_event.is_set()
+        def update_status(self): self.listener.new_media_status(self.status)
+        def stop(self): self.status.media_session_id = None
+        def pause(self):
+            self.status.player_state = "PAUSED"
+            self.listener.new_media_status(self.status)
+    media = FakeMedia()
+    cast = SimpleNamespace(media_controller=media, wait=lambda timeout: None, disconnect=lambda: None)
+    monkeypatch.setattr("lantern.controller.pychromecast.get_chromecast_from_host", lambda host: cast)
+    async def fake_probe(path): return Probe("h264", "aac", 45, "mp4")
+    monkeypatch.setattr("lantern.controller.probe", fake_probe)
+    return media
+
+
+async def cast_controller(tmp_path, monkeypatch, count):
+    controller = Controller(tmp_path / "cache", lambda *args: None)
+    async def prepare(path, info, progress): return path
+    monkeypatch.setattr(controller.preparation, "prepare", prepare)
+    items = []
+    for index in range(count):
+        source = tmp_path / f"{index}.mp4"
+        source.touch()
+        items.append({"id": str(index), "title": str(index), "path": str(source), "subtitles": [], "selected_subtitle": None})
+    await controller.start()
+    await controller.sync(items)
+    await controller.connect(asdict(Device("cast", "TV", "127.0.0.1", 8009, "cast")))
+    return controller, items
+
+
+async def test_cast_reorder_preserves_pause_and_position(cast_playback, monkeypatch, tmp_path):
+    controller, items = await cast_controller(tmp_path, monkeypatch, 3)
+    try:
+        await controller.play("0", 17)
+        await controller.preload_task
+        await controller.command("pause")
+        await asyncio.sleep(0)
+        assert not controller.playing
+        await controller.sync([items[0], items[2], items[1]])
+        await controller.play_task
+        current_loads = [kwargs for url, kwargs in cast_playback.loads if url.endswith("/0")]
+        assert len(current_loads) == 2
+        assert current_loads[-1]["autoplay"] is False
+        assert current_loads[-1]["current_time"] == 17
+        assert not controller.playing
+    finally:
+        await controller.close()
+
+
+async def test_cast_append_does_not_reload_current_item(cast_playback, monkeypatch, tmp_path):
+    controller, items = await cast_controller(tmp_path, monkeypatch, 2)
+    try:
+        await controller.sync(items[:1])
+        await controller.play("0")
+        await controller.preload_task
+        await controller.sync(items)
+        await controller.preload_task
+        assert sum(url.endswith("/0") for url, _ in cast_playback.loads) == 1
+        assert any(url.endswith("/1") and kwargs["enqueue"] for url, kwargs in cast_playback.loads)
+    finally:
+        await controller.close()
