@@ -93,6 +93,7 @@ class Preparation:
         self.cache.mkdir(parents=True, exist_ok=True)
         self.process: asyncio.subprocess.Process | None = None
         self._lock = asyncio.Lock()
+        self.pinned: set[Path] = set()
         self.cleanup()
 
     def cleanup(self) -> bool:
@@ -106,10 +107,32 @@ class Preparation:
         return complete
 
     async def cleanup_async(self) -> None:
-        for delay in (0.1, 0.3, 0.8, 1.5):
-            await asyncio.sleep(delay)
+        for delay in (0, 0.1, 0.3, 0.8, 1.5):
+            if delay:
+                await asyncio.sleep(delay)
             if self.cleanup():
                 return
+
+    def reserve(self, estimated: int) -> int:
+        if estimated > self.quota:
+            raise ValueError(f"Preparing this file would exceed the {self.quota / GIB:g} GiB session cache limit.")
+        files = [(path, path.stat()) for path in self.cache.glob("*.mp4") if path.is_file()]
+        used = sum(stat.st_size for _, stat in files)
+        for path, stat in sorted(files, key=lambda entry: entry[1].st_mtime_ns):
+            if used + estimated <= self.quota and shutil.disk_usage(self.cache).free >= estimated + GIB:
+                break
+            if path in self.pinned:
+                continue
+            try:
+                path.unlink()
+                used -= stat.st_size
+            except OSError:
+                continue  # A decoder may still hold the previous item open.
+        if used + estimated > self.quota:
+            raise ValueError("The session cache is full with files still in playback or queued. Stop the session to clear it.")
+        if shutil.disk_usage(self.cache).free < estimated + GIB:
+            raise ValueError("There is not enough free space to prepare this file and leave 1 GiB available.")
+        return used
 
     async def prepare(self, path: Path, info: Probe, progress: Callable[[float], None], *, copy_audio: bool = False) -> Path:
         async with self._lock:
@@ -122,14 +145,11 @@ class Preparation:
         key = hashlib.sha256(f"v2:{path}:{stat.st_size}:{stat.st_mtime_ns}:{copy_audio}".encode()).hexdigest()[:24]
         destination = self.cache / f"{key}.mp4"
         if destination.is_file():
+            destination.touch()
             return destination
         partial = self.cache / f"{key}-{uuid.uuid4().hex}.part"
         estimated = stat.st_size + int(max(info.duration, 1) * 24000)
-        used = sum(p.stat().st_size for p in self.cache.glob("*.mp4"))
-        if estimated > self.quota or used + estimated > self.quota:
-            raise ValueError("Preparing this file would exceed the 10 GiB session cache. Stop the session to clear it, or use the TV receiver directly.")
-        if shutil.disk_usage(self.cache).free < estimated + GIB:
-            raise ValueError("There is not enough free space to prepare this file and leave 1 GiB available.")
+        used = self.reserve(estimated)
         video_map = f"0:{info.video_index}" if info.video_index is not None else "0:v:0?"
         audio_map = f"0:{info.audio_index}" if info.audio_index is not None else "0:a:0?"
         maps = (["-map", video_map] if info.video else []) + (["-map", audio_map] if info.audio else [])

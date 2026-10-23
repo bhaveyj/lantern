@@ -329,6 +329,12 @@ class Controller:
         plan = playback_plan(info, cast, self.audio_mimes, path.suffix)
         self.mime_types[item["id"]] = plan.mime_type
         if plan.mode != "direct":
+            protected = {self.current_id}
+            if self.cast and self.current_id:
+                order = [m["id"] for m in self.playlist]
+                if self.current_id in order:
+                    protected.update(media_id for media_id in order[order.index(self.current_id) + 1:] if media_id in self.cast_enqueued)
+            self.preparation.pinned = {self.server.files[media_id] for media_id in protected if media_id in self.server.files}
             self.emit("status", {"message": f"Preparing {item['title']}…", "busy": True})
             path = await self.preparation.prepare(path, info, lambda percent: self.emit("progress", {"percent": percent, "title": item["title"]}), copy_audio=plan.mode == "remux")
         self.server.files[item["id"]] = path

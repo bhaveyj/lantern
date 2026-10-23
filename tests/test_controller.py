@@ -464,3 +464,24 @@ async def test_direct_cast_playback_caches_probe_and_invalidates_changed_files(t
     source.write_bytes(b"changed source")
     await controller.prepared_url(item, True)
     assert len(probes) == 2
+
+
+async def test_preparation_protects_current_and_future_cast_queue(tmp_path, monkeypatch):
+    controller = Controller(tmp_path / "cache", lambda *args: None)
+    controller.device = Device("cast", "TV", "127.0.0.1", 8009, "cast")
+    controller.cast = object()
+    controller.current_id = "current"
+    controller.cast_enqueued = {"previous", "current", "next"}
+    for media_id in ("previous", "current", "next", "new"):
+        source = tmp_path / f"{media_id}.mkv"
+        source.touch()
+        controller.playlist.append({"id": media_id, "path": str(source), "title": media_id})
+        controller.server.files[media_id] = controller.preparation.cache / f"{media_id}.mp4"
+    async def probe(path): return Probe("h264", "ac3", 10, "matroska", 6)
+    async def prepare(path, info, progress, **kwargs):
+        assert controller.preparation.pinned == {controller.server.files["current"], controller.server.files["next"]}
+        return path
+    monkeypatch.setattr("lantern.controller.probe", probe)
+    monkeypatch.setattr("lantern.controller.local_address", lambda host: "127.0.0.1")
+    monkeypatch.setattr(controller.preparation, "prepare", prepare)
+    await controller.prepared_url(controller.playlist[-1], True)

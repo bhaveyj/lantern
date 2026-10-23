@@ -1,4 +1,5 @@
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
@@ -33,7 +34,7 @@ async def test_storage_limit_and_unsupported_video(tmp_path):
     preparation = Preparation(tmp_path / "cache", quota=1)
     with pytest.raises(ValueError, match="video conversion"):
         await preparation.prepare(source, Probe("vp9", "aac", 10, "matroska"), lambda _: None)
-    with pytest.raises(ValueError, match="10 GiB"):
+    with pytest.raises(ValueError, match="session cache limit"):
         await preparation.prepare(source, Probe("h264", "aac", 10, "matroska"), lambda _: None)
 
 
@@ -68,3 +69,26 @@ async def test_real_audio_preparation_preserves_video_and_original(tmp_path, cop
         assert await audio_bytes(source) == await audio_bytes(result)
     preparation.cleanup()
     assert not result.exists()
+
+
+def test_cache_evicts_oldest_unused_files_and_preserves_playback(tmp_path):
+    preparation = Preparation(tmp_path / "cache", quota=100)
+    oldest, recent, active = [preparation.cache / f"{name}.mp4" for name in ("oldest", "recent", "active")]
+    for path, size, timestamp in ((oldest, 20, 1), (recent, 20, 2), (active, 40, 3)):
+        path.write_bytes(b"x" * size)
+        os.utime(path, (timestamp, timestamp))
+    preparation.pinned = {active}
+    assert preparation.reserve(30) == 60
+    assert not oldest.exists()
+    assert recent.exists()
+    assert active.exists()
+
+
+def test_full_cache_never_evicts_files_used_by_decoder(tmp_path):
+    preparation = Preparation(tmp_path / "cache", quota=100)
+    active = preparation.cache / "active.mp4"
+    active.write_bytes(b"x" * 80)
+    preparation.pinned = {active}
+    with pytest.raises(ValueError, match="still in playback"):
+        preparation.reserve(30)
+    assert active.exists()
