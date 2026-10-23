@@ -75,6 +75,7 @@ async def test_cast_starts_without_active_session_and_polls(monkeypatch, tmp_pat
             self.url = url
             self.status.media_session_id = 1
             self.session_active_event.set()
+            self.listener.new_media_status(SimpleNamespace(content_id=url, player_state="PLAYING", current_time=0, duration=45, idle_reason=None))
         def block_until_active(self, timeout): assert self.session_active_event.is_set()
         def update_status(self): self.polls += 1
         def stop(self):
@@ -335,3 +336,71 @@ async def test_cast_append_does_not_reload_current_item(cast_playback, monkeypat
         assert any(url.endswith("/1") and kwargs["enqueue"] for url, kwargs in cast_playback.loads)
     finally:
         await controller.close()
+
+
+async def test_cast_load_failure_clears_state(cast_playback, monkeypatch, tmp_path):
+    controller, _ = await cast_controller(tmp_path, monkeypatch, 1)
+    def fail_load(*args, **kwargs):
+        cast_playback.listener.load_media_failed(1, 104)
+    monkeypatch.setattr(cast_playback, "play_media", fail_load)
+    try:
+        with pytest.raises(RuntimeError, match="104"):
+            await controller.play("0")
+        assert controller.current_id is None
+        assert not controller.cast_loaded
+        assert not controller.playing
+    finally:
+        await controller.close()
+
+
+async def test_cast_requires_status_for_requested_file(cast_playback, monkeypatch, tmp_path):
+    controller, _ = await cast_controller(tmp_path, monkeypatch, 1)
+    cast_playback.session_active_event.set()  # An old session is insufficient.
+    monkeypatch.setattr(cast_playback, "play_media", lambda *args, **kwargs: None)
+    monkeypatch.setattr("lantern.controller.CAST_LOAD_TIMEOUT", .05)
+    try:
+        with pytest.raises(RuntimeError, match="requested file"):
+            await controller.play("0")
+        assert not controller.cast_loaded
+        assert controller.current_id is None
+    finally:
+        await controller.close()
+
+
+def test_cast_unknown_media_and_stale_callbacks(tmp_path):
+    events = []
+    controller = Controller(tmp_path / "cache", lambda *args: events.append(args))
+    controller.cast_loaded = True
+    controller.current_id = "movie"
+    controller.playing = True
+    controller.on_cast_state({"id": "", "playing": False, "position": 0, "duration": 0})
+    assert not controller.playing
+    assert controller.current_id is None
+    assert any(kind == "state" for kind, _ in events)
+    events.clear()
+    controller.on_cast_load_failed(104, generation=controller._session_generation - 1)
+    controller.on_cast_state({"id": "old"}, generation=controller._session_generation - 1)
+    assert not events
+
+
+async def test_cancelled_cast_command_finishes_before_next_operation(tmp_path):
+    controller = Controller(tmp_path / "cache", lambda *args: None)
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    def command():
+        started.set()
+        release.wait(2)
+        finished.set()
+    task = asyncio.create_task(controller.cast_call(command))
+    try:
+        assert await asyncio.to_thread(started.wait, 1)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 1)
+        assert finished.is_set()
+    finally:
+        release.set()

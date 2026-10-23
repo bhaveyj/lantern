@@ -19,6 +19,7 @@ from .media import Preparation, needs_preparation, probe
 from .server import MediaServer
 
 RECEIVER_PING_INTERVAL = 10.0
+CAST_LOAD_TIMEOUT = 15.0
 logger = logging.getLogger(__name__)
 
 
@@ -76,6 +77,18 @@ class Discovery(ServiceListener):
         self.zeroconf.close()
 
 
+class CastListener:
+    def __init__(self, controller, generation: int):
+        self.controller = controller
+        self.generation = generation
+
+    def new_media_status(self, status):
+        self.controller.new_media_status(status, self.generation)
+
+    def load_media_failed(self, queue_item_id, error_code):
+        self.controller.load_media_failed(queue_item_id, error_code, self.generation)
+
+
 class Controller:
     def __init__(self, cache: Path, emit: Callable[[str, dict], None]):
         self.emit = emit
@@ -102,6 +115,19 @@ class Controller:
         self.mime_types: dict[str, str] = {}
         self._operation_lock = asyncio.Lock()
         self._playback_tasks: set[asyncio.Task] = set()
+        self._session_generation = 0
+        self._cast_load_result: asyncio.Future | None = None
+        self._pending_cast_id: str | None = None
+
+    async def cast_call(self, function, *args, **kwargs):
+        task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # Cancelling to_thread does not stop the underlying Cast command.
+            # Finish it before another operation can take ownership of the session.
+            await asyncio.gather(task, return_exceptions=True)
+            raise
 
     def playback_task(self, coroutine) -> asyncio.Task:
         task = asyncio.create_task(coroutine)
@@ -168,6 +194,7 @@ class Controller:
 
     async def _connect(self, device: dict, pin: str):
         await self._disconnect()
+        self._session_generation += 1
         self.device = Device(**device)
         self.emit("status", {"message": f"Connecting to {self.device.name}…", "busy": True})
         try:
@@ -185,9 +212,9 @@ class Controller:
                 await self._sync(self.playlist)
             else:
                 device_uuid = uuid.UUID(self.device.uuid) if self.device.uuid else uuid.uuid4()
-                self.cast = await asyncio.to_thread(pychromecast.get_chromecast_from_host, (self.device.host, self.device.port, device_uuid, self.device.model, self.device.name))
-                await asyncio.to_thread(self.cast.wait, 10)
-                self.cast.media_controller.register_status_listener(self)
+                self.cast = await self.cast_call(pychromecast.get_chromecast_from_host, (self.device.host, self.device.port, device_uuid, self.device.model, self.device.name))
+                await self.cast_call(self.cast.wait, 10)
+                self.cast.media_controller.register_status_listener(CastListener(self, self._session_generation))
                 self.cast_poll_task = asyncio.create_task(self.poll_cast())
             self.emit("connected", {"name": self.device.name, "kind": self.device.kind})
             self.emit("status", {"message": "Connected · choose a video and play", "busy": False})
@@ -218,6 +245,8 @@ class Controller:
         ws = ws or self.ws
         try:
             async for message in ws:
+                if ws is not self.ws:
+                    break
                 if message.type != aiohttp.WSMsgType.TEXT:
                     continue
                 import json
@@ -245,17 +274,17 @@ class Controller:
             self.play_task.cancel()
         if self.preload_task and not self.preload_task.done() and not self.preload_task.cancelling():
             self.preload_task.cancel()
-        self.play_task = self.playback_task(self.guarded_play(media_id, position, autoplay=autoplay))
+        self.play_task = self.playback_task(self.guarded_play(media_id, position, autoplay=autoplay, generation=self._session_generation))
 
-    async def guarded_play(self, media_id: str, position: float = 0, *, autoplay: bool = True):
+    async def guarded_play(self, media_id: str, position: float = 0, *, autoplay: bool = True, generation=None):
         try:
-            await self.play(media_id, position, autoplay=autoplay)
+            await self.play(media_id, position, autoplay=autoplay, generation=generation)
         except asyncio.CancelledError:
             raise
         except Exception as error:
             self.emit("error", {"message": str(error)})
         finally:
-            if asyncio.current_task() is self.play_task:
+            if asyncio.current_task() is self.play_task and generation == self._session_generation:
                 self.emit("status", {"message": "Ready", "busy": False})
 
     async def prepared_url(self, item: dict, cast: bool) -> tuple[str, float]:
@@ -270,7 +299,7 @@ class Controller:
         self.server.files[item["id"]] = path
         return self.server.url(local_address(self.device.host), item["id"]), info.duration
 
-    async def play(self, media_id: str, position: float = 0, *, autoplay: bool = True):
+    async def play(self, media_id: str, position: float = 0, *, autoplay: bool = True, generation=None):
         task = asyncio.current_task()
         self._playback_tasks.add(task)
         try:
@@ -279,6 +308,8 @@ class Controller:
                     self.preload_task.cancel()
                 await asyncio.gather(self.preload_task, return_exceptions=True)
             async with self._operation_lock:
+                if generation is not None and generation != self._session_generation:
+                    return
                 await self._play(media_id, position, autoplay=autoplay)
         finally:
             self._playback_tasks.discard(task)
@@ -299,20 +330,31 @@ class Controller:
             self.cast_loaded = False
             self.cast_finished_id = None
             if self.cast.media_controller.status.media_session_id is not None:
-                await asyncio.to_thread(self.cast.media_controller.stop)
-            await self.cast_load(item, url, False, position, autoplay=autoplay)
-            self.cast_loaded = True
-            await asyncio.to_thread(self.cast.media_controller.block_until_active, 15)
-            if not self.cast.media_controller.session_active_event.is_set():
-                raise RuntimeError("The Cast receiver did not start. Check that Google Cast is enabled on the TV.")
+                await self.cast_call(self.cast.media_controller.stop)
+            self._pending_cast_id = media_id
+            result = self._cast_load_result = asyncio.get_running_loop().create_future()
+            try:
+                await self.cast_load(item, url, False, position, autoplay=autoplay)
+                await asyncio.wait_for(asyncio.shield(result), CAST_LOAD_TIMEOUT)
+            except TimeoutError:
+                self.cast_failed("The Cast receiver did not load the requested file. Check the TV and home network.")
+                raise RuntimeError("The Cast receiver did not load the requested file.") from None
+            finally:
+                if not result.done():
+                    result.cancel()
+                elif not result.cancelled():
+                    result.exception()
+                self._cast_load_result = None
+                self._pending_cast_id = None
             self.preload_task = self.playback_task(self.preload_next(media_id))
-        self.playing = autoplay
-        self.emit("state", {"id": media_id, "playing": autoplay, "position": position, "duration": duration})
+        if self.device.kind == "receiver":
+            self.playing = autoplay
+            self.emit("state", {"id": media_id, "playing": autoplay, "position": position, "duration": duration})
 
     async def cast_load(self, item: dict, url: str, enqueue: bool, position: float = 0, *, autoplay: bool = True):
         sub = next((s for s in item["subtitles"] if s["id"] == item.get("selected_subtitle")), None)
         subtitle_url = self.server.subtitle_url(local_address(self.device.host), sub["id"]) if sub else None
-        await asyncio.to_thread(self.cast.media_controller.play_media, url, self.mime_types.get(item["id"], "video/mp4"), title=item["title"], stream_type="BUFFERED", subtitles=subtitle_url, subtitles_mime="text/vtt", enqueue=enqueue, current_time=position, autoplay=autoplay)
+        await self.cast_call(self.cast.media_controller.play_media, url, self.mime_types.get(item["id"], "video/mp4"), title=item["title"], stream_type="BUFFERED", subtitles=subtitle_url, subtitles_mime="text/vtt", enqueue=enqueue, current_time=position, autoplay=autoplay)
 
     async def preload_next(self, media_id: str):
         async with self._operation_lock:
@@ -334,21 +376,57 @@ class Controller:
         finally:
             self.emit("status", {"message": "Connected", "busy": False})
 
-    def new_media_status(self, status):
+    def new_media_status(self, status, generation=None):
         if self.loop and not self.loop.is_closed():
-            self.loop.call_soon_threadsafe(self.on_cast_state, {"id": urlparse(status.content_id or "").path.rsplit("/", 1)[-1], "playing": status.player_state == "PLAYING", "position": status.current_time or 0, "duration": status.duration or 0, "playerState": status.player_state, "idleReason": status.idle_reason})
+            self.loop.call_soon_threadsafe(self.on_cast_state, {"id": urlparse(status.content_id or "").path.rsplit("/", 1)[-1], "playing": status.player_state == "PLAYING", "position": status.current_time or 0, "duration": status.duration or 0, "playerState": status.player_state, "idleReason": status.idle_reason}, generation)
+
+    def load_media_failed(self, queue_item_id, error_code, generation=None):
+        if self.loop and not self.loop.is_closed():
+            self.loop.call_soon_threadsafe(self.on_cast_load_failed, error_code, generation)
+
+    def on_cast_load_failed(self, error_code, generation=None):
+        if generation is not None and generation != self._session_generation:
+            return
+        message = f"Cast could not load this file (decoder/network code {error_code})."
+        pending = self._cast_load_result
+        self.cast_failed(message)
+        if pending and not pending.done():
+            pending.set_exception(RuntimeError(message))
+        else:
+            self.emit("error", {"message": message})
+
+    def cast_failed(self, message):
+        self.cast_loaded = False
+        self.current_id = None
+        self.current_position = 0
+        self.playing = False
+        self.emit("state", {"id": None, "playing": False, "position": 0, "duration": 0, "playerState": "IDLE"})
+        self.emit("notice", {"message": message})
 
     async def poll_cast(self):
         while self.cast:
             await asyncio.sleep(2)
             if self.cast and self.cast_loaded:
                 try:
-                    await asyncio.to_thread(self.cast.media_controller.update_status)
+                    await self.cast_call(self.cast.media_controller.update_status)
                 except Exception:
                     self.emit("notice", {"message": "Cast status is temporarily unavailable. Reconnect if playback has stopped."})
 
-    def on_cast_state(self, data):
+    def on_cast_state(self, data, generation=None):
+        if generation is not None and generation != self._session_generation:
+            return
+        pending = self._cast_load_result
+        if pending and not pending.done() and data["id"] == self._pending_cast_id:
+            if data.get("idleReason") == "ERROR":
+                self.on_cast_load_failed("PLAYBACK_ERROR", generation)
+                return
+            if data.get("playerState") in {"PLAYING", "PAUSED", "BUFFERING"}:
+                self.cast_loaded = True
+                pending.set_result(data)
         if not self.cast_loaded:
+            return
+        if data.get("idleReason") == "ERROR":
+            self.on_cast_load_failed("PLAYBACK_ERROR", generation)
             return
         if data["id"] in {m["id"] for m in self.playlist}:
             changed = self.current_id != data["id"]
@@ -358,6 +436,8 @@ class Controller:
             self.emit("state", data)
             if changed:
                 self.preload_task = self.playback_task(self.preload_next(self.current_id))
+        else:
+            self.cast_failed("Cast playback ended or another app took control of the TV.")
 
     async def command(self, action: str, value=None):
         if not self.device:
@@ -367,13 +447,13 @@ class Controller:
         elif self.cast:
             mc = self.cast.media_controller
             if action == "play":
-                await asyncio.to_thread(mc.play)
+                await self.cast_call(mc.play)
             elif action == "pause":
-                await asyncio.to_thread(mc.pause)
+                await self.cast_call(mc.pause)
             elif action == "seek":
-                await asyncio.to_thread(mc.seek, max(0, float(value)))
+                await self.cast_call(mc.seek, max(0, float(value)))
             elif action == "volume":
-                await asyncio.to_thread(self.cast.set_volume, float(value))
+                await self.cast_call(self.cast.set_volume, float(value))
             elif action in {"next", "previous"} and self.current_id:
                 index = next((i for i, m in enumerate(self.playlist) if m["id"] == self.current_id), 0)
                 index = max(0, min(len(self.playlist) - 1, index + (1 if action == "next" else -1)))
@@ -400,7 +480,7 @@ class Controller:
             if self.ws and not self.ws.closed:
                 await asyncio.wait_for(self.send({"type": "playback.command", "action": "stop"}), timeout=3)
             if self.cast and self.cast.media_controller.status.media_session_id is not None:
-                await asyncio.to_thread(self.cast.media_controller.stop)
+                await self.cast_call(self.cast.media_controller.stop)
         except Exception as error:
             logger.warning("Remote stop failed: %s", error)
         finally:
@@ -430,6 +510,7 @@ class Controller:
                 await self._disconnect()
 
     async def _disconnect(self):
+        self._session_generation += 1
         try:
             await self._stop()
         finally:
@@ -442,15 +523,23 @@ class Controller:
                 await asyncio.gather(self.reader, return_exceptions=True)
                 self.reader = None
             if self.ws:
-                await self.ws.close()
-                self.ws = None
+                try:
+                    await self.ws.close()
+                except Exception as error:
+                    logger.warning("Receiver socket cleanup failed: %s", error)
+                finally:
+                    self.ws = None
             if self.cast:
                 if self.cast_poll_task:
                     self.cast_poll_task.cancel()
                     await asyncio.gather(self.cast_poll_task, return_exceptions=True)
                     self.cast_poll_task = None
-                await asyncio.to_thread(self.cast.disconnect)
-                self.cast = None
+                try:
+                    await self.cast_call(self.cast.disconnect)
+                except Exception as error:
+                    logger.warning("Cast cleanup failed: %s", error)
+                finally:
+                    self.cast = None
             self.device = None
             self.emit("disconnected", {})
 
