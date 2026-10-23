@@ -118,6 +118,7 @@ class Controller:
         self._session_generation = 0
         self._cast_load_result: asyncio.Future | None = None
         self._pending_cast_id: str | None = None
+        self._subtitle_revisions: dict[str, int] = {}
 
     async def cast_call(self, function, *args, **kwargs):
         task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
@@ -155,13 +156,19 @@ class Controller:
             await self._sync(items)
 
     async def _sync(self, items: list[dict]):
+        previous_items = {m["id"]: m for m in self.playlist}
         old_order = [m["id"] for m in self.playlist]
         previous_paths = {m["id"]: m["path"] for m in self.playlist}
         prepared_files = dict(self.server.files)
         self.playlist = copy.deepcopy(items)
+        self._subtitle_revisions = {m["id"]: self._subtitle_revisions.get(m["id"], 0) for m in self.playlist}
         self.server.files.clear()
         self.server.subtitles.clear()
         for item in self.playlist:
+            previous_item = previous_items.get(item["id"])
+            if previous_item and self._subtitle_revisions[item["id"]]:
+                selected = previous_item.get("selected_subtitle")
+                item["selected_subtitle"] = selected if selected in {s["id"] for s in item["subtitles"]} else None
             previous = prepared_files.get(item["id"])
             self.server.files[item["id"]] = previous if previous_paths.get(item["id"]) == item["path"] and previous and previous.is_file() else Path(item["path"])
             for subtitle in item["subtitles"]:
@@ -185,7 +192,7 @@ class Controller:
         if not self.device:
             return []
         host = local_address(self.device.host)
-        return [{"id": m["id"], "title": m["title"], "url": self.server.url(host, m["id"]), "selectedSubtitle": m.get("selected_subtitle"), "subtitles": [{"id": s["id"], "label": s["label"], "url": self.server.subtitle_url(host, s["id"])} for s in m["subtitles"]]} for m in self.playlist]
+        return [{"id": m["id"], "title": m["title"], "url": self.server.url(host, m["id"]), "selectedSubtitle": m.get("selected_subtitle"), "subtitleRevision": self._subtitle_revisions.get(m["id"], 0), "subtitles": [{"id": s["id"], "label": s["label"], "url": self.server.subtitle_url(host, s["id"])} for s in m["subtitles"]]} for m in self.playlist]
 
     async def connect(self, device: dict, pin: str = ""):
         await self.cancel_playback()
@@ -252,10 +259,7 @@ class Controller:
                 import json
                 data = json.loads(message.data)
                 if data.get("type") == "playback.state":
-                    self.current_id = data.get("id")
-                    self.current_position = data.get("position", 0)
-                    self.playing = data.get("playing", False)
-                    self.emit("state", data)
+                    self.receiver_state(data)
                 elif data.get("type") == "request.play":
                     self.queue_play(data["id"])
                 elif data.get("type") == "error":
@@ -268,6 +272,26 @@ class Controller:
             if ws and ws.closed and ws is self.ws:
                 logger.info("TV control connection closed (code %s)", ws.close_code)
                 asyncio.create_task(self.disconnect(expected_ws=ws))
+
+    def receiver_state(self, data: dict):
+        data = dict(data)
+        self.current_id = data.get("id")
+        self.current_position = data.get("position", 0)
+        self.playing = data.get("playing", False)
+        item = next((m for m in self.playlist if m["id"] == self.current_id), None)
+        if item and "subtitleId" in data:
+            selected = data["subtitleId"]
+            current_revision = self._subtitle_revisions.get(item["id"], 0)
+            revision = data.get("subtitleRevision", current_revision)
+            valid = selected is None or selected in {s["id"] for s in item["subtitles"]}
+            if valid and isinstance(revision, int) and revision >= current_revision:
+                if "subtitleRevision" not in data and selected != item.get("selected_subtitle"):
+                    revision += 1
+                item["selected_subtitle"] = selected
+                self._subtitle_revisions[item["id"]] = revision
+            else:
+                data.pop("subtitleId", None)
+        self.emit("state", data)
 
     def queue_play(self, media_id: str, position: float = 0, *, autoplay: bool = True):
         if self.play_task and not self.play_task.done() and not self.play_task.cancelling():
@@ -460,12 +484,19 @@ class Controller:
                 self.queue_play(self.playlist[index]["id"])
 
     async def subtitle(self, media_id: str, subtitle_id: str | None):
+        async with self._operation_lock:
+            await self._subtitle(media_id, subtitle_id)
+
+    async def _subtitle(self, media_id: str, subtitle_id: str | None):
         item = next(m for m in self.playlist if m["id"] == media_id)
+        if subtitle_id is not None and subtitle_id not in {s["id"] for s in item["subtitles"]}:
+            raise ValueError("This subtitle is no longer in the playlist.")
         item["selected_subtitle"] = subtitle_id
+        revision = self._subtitle_revisions[media_id] = self._subtitle_revisions.get(media_id, 0) + 1
         if self.device and self.device.kind == "receiver":
             await self.send({"type": "playlist.snapshot", "items": self.wire_playlist()})
             if self.current_id == media_id:
-                await self.send({"type": "playback.command", "action": "subtitle", "value": subtitle_id})
+                await self.send({"type": "playback.command", "action": "subtitle", "value": subtitle_id, "revision": revision})
         elif self.current_id == media_id:
             self.emit("notice", {"message": "The subtitle selection will apply when you play this video again in Cast mode."})
 

@@ -404,3 +404,38 @@ async def test_cancelled_cast_command_finishes_before_next_operation(tmp_path):
         assert finished.is_set()
     finally:
         release.set()
+
+
+async def test_tv_subtitle_selection_survives_replay_and_stale_library_sync(tmp_path, monkeypatch):
+    controller = Controller(tmp_path / "cache", lambda *args: None)
+    source = tmp_path / "movie.mp4"
+    source.touch()
+    item = {"id": "movie", "title": "Movie", "path": str(source), "selected_subtitle": "english",
+            "subtitles": [{"id": name, "path": str(tmp_path / f"{name}.srt"), "label": name} for name in ("english", "french")]}
+    await controller.sync([item])
+    controller.receiver_state({"id": "movie", "subtitleId": "french", "subtitleRevision": 1, "position": 10})
+    await controller.sync([item])
+    controller.device = Device("tv", "TV", "127.0.0.1", 8765, "receiver")
+    monkeypatch.setattr("lantern.controller.local_address", lambda host: "127.0.0.1")
+    assert controller.wire_playlist()[0]["selectedSubtitle"] == "french"
+    assert controller.wire_playlist()[0]["subtitleRevision"] == 1
+
+
+async def test_stale_subtitle_state_cannot_undo_new_selection(tmp_path):
+    events = []
+    controller = Controller(tmp_path / "cache", lambda *args: events.append(args))
+    controller.playlist = [{"id": "movie", "subtitles": [{"id": "english"}], "selected_subtitle": None}]
+    await controller.subtitle("movie", "english")
+    controller.receiver_state({"id": "movie", "subtitleId": None, "subtitleRevision": 0, "position": 12})
+    assert controller.playlist[0]["selected_subtitle"] == "english"
+    assert controller.current_position == 12
+    assert "subtitleId" not in events[-1][1]
+    controller.receiver_state({"id": "movie", "subtitleId": None, "subtitleRevision": 2})
+    assert controller.playlist[0]["selected_subtitle"] is None
+
+
+def test_legacy_receiver_subtitle_state_is_supported(tmp_path):
+    controller = Controller(tmp_path / "cache", lambda *args: None)
+    controller.playlist = [{"id": "movie", "subtitles": [{"id": "english"}], "selected_subtitle": None}]
+    controller.receiver_state({"id": "movie", "subtitleId": "english"})
+    assert controller.playlist[0]["selected_subtitle"] == "english"

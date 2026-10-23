@@ -56,7 +56,10 @@ class MainActivity : Activity() {
     private var drawer: View? = null
     private var items = listOf<JSONObject>()
     private var current: JSONObject? = null
-    private var selectedSubtitle: String? = null
+    private val subtitleSelection = SubtitleSelection()
+    private var selectedSubtitle: String?
+        get() = subtitleSelection.id
+        set(value) { subtitleSelection.select(value) }
     private var changingSeek = false
     private var nsd: NsdManager? = null
     private var registration: NsdManager.RegistrationListener? = null
@@ -233,6 +236,17 @@ class MainActivity : Activity() {
         when (message.optString("type")) {
             "playlist.snapshot" -> {
                 items = message.optJSONArray("items").objects()
+                val previous = current
+                val updated = items.firstOrNull { it.optString("id") == previous?.optString("id") }
+                if (previous != null && updated != null) {
+                    val tracksChanged = previous.optJSONArray("subtitles")?.toString() != updated.optJSONArray("subtitles")?.toString()
+                    current = JSONObject(updated.toString()).put("url", previous.getString("url"))
+                    subtitleSelection.accept(updated.subtitleId(), updated.optLong("subtitleRevision", 0))
+                    if (tracksChanged) {
+                        player.replaceMediaItem(player.currentMediaItemIndex, mediaItem(current!!))
+                    }
+                    applySubtitle()
+                }
                 if (current == null) connectionView.text = "${items.size} files ready · start playback from Windows"
                 if (drawer != null) showPlaylist()
             }
@@ -246,7 +260,10 @@ class MainActivity : Activity() {
                 "next" -> requestAdjacent(1)
                 "previous" -> requestAdjacent(-1)
                 "fit" -> playerView.resizeMode = if (message.optString("value") == "fill") AspectRatioFrameLayout.RESIZE_MODE_ZOOM else AspectRatioFrameLayout.RESIZE_MODE_FIT
-                "subtitle" -> { selectedSubtitle = if (message.isNull("value")) null else message.optString("value"); applySubtitle() }
+                "subtitle" -> {
+                    val selected = if (message.isNull("value")) null else message.optString("value")
+                    if (subtitleSelection.accept(selected, message.optLong("revision", subtitleSelection.revision))) applySubtitle()
+                }
             }
         }
         updateState()
@@ -254,19 +271,25 @@ class MainActivity : Activity() {
 
     private fun load(item: JSONObject) {
         current = item
-        selectedSubtitle = if (item.isNull("selectedSubtitle")) null else item.optString("selectedSubtitle").ifBlank { null }
+        subtitleSelection.reset(item.subtitleId(), item.optLong("subtitleRevision", 0))
+        player.setMediaItem(mediaItem(item), (item.optDouble("position", 0.0).coerceAtLeast(0.0) * 1000).toLong())
+        player.playWhenReady = item.optBoolean("autoplay", true)
+        player.prepare()
+        titleView.text = item.getString("title")
+        welcome.visibility = View.GONE
+        closeDrawer()
+        showControls()
+    }
+
+    private fun JSONObject.subtitleId(): String? = if (isNull("selectedSubtitle")) null else optString("selectedSubtitle").ifBlank { null }
+
+    private fun mediaItem(item: JSONObject): MediaItem {
         val subtitles = item.optJSONArray("subtitles").objects().map { subtitle ->
             MediaItem.SubtitleConfiguration.Builder(Uri.parse(subtitle.getString("url")))
                 .setId(subtitle.getString("id")).setLabel(subtitle.getString("label"))
                 .setMimeType(MimeTypes.TEXT_VTT).setSelectionFlags(if (subtitle.getString("id") == selectedSubtitle) C.SELECTION_FLAG_DEFAULT else 0).build()
         }
-        player.setMediaItem(MediaItem.Builder().setMediaId(item.getString("id")).setUri(item.getString("url")).setSubtitleConfigurations(subtitles).build())
-        player.prepare()
-        player.play()
-        titleView.text = item.getString("title")
-        welcome.visibility = View.GONE
-        closeDrawer()
-        showControls()
+        return MediaItem.Builder().setMediaId(item.getString("id")).setUri(item.getString("url")).setSubtitleConfigurations(subtitles).build()
     }
 
     private fun applySubtitle() {
@@ -352,7 +375,7 @@ class MainActivity : Activity() {
         if (!changingSeek) timeline.progress = if (duration > 0) (player.currentPosition * 1000 / duration).toInt() else 0
         times.text = "${time(player.currentPosition)} / ${time(duration)}"
         playButton.text = if (player.isPlaying) "Pause" else "Play"
-        server.publish(JSONObject().put("type", "playback.state").put("id", current?.optString("id") ?: JSONObject.NULL).put("playing", player.isPlaying).put("position", player.currentPosition / 1000.0).put("duration", duration / 1000.0).put("subtitleId", selectedSubtitle ?: JSONObject.NULL))
+        server.publish(JSONObject().put("type", "playback.state").put("id", current?.optString("id") ?: JSONObject.NULL).put("playing", player.isPlaying).put("position", player.currentPosition / 1000.0).put("duration", duration / 1000.0).put("subtitleId", selectedSubtitle ?: JSONObject.NULL).put("subtitleRevision", subtitleSelection.revision))
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {

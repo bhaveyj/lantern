@@ -6,6 +6,14 @@ Windows opens a WebSocket at `ws://TV_IP:8765/control`. Its first text message, 
 
 Messages after pairing:
 
+Playlist/load items may include `subtitleRevision` (a nonnegative integer).
+Subtitle commands carry the new counter as `revision`; receiver state echoes it
+as `subtitleRevision`. Each side advances the counter for a local selection and
+ignores selections with an older counter. Legacy peers may omit these fields.
+Load items also accept optional `position` (seconds, default 0) and `autoplay`
+(default true). Updating subtitle tracks in a snapshot preserves the active
+item's position and paused state.
+
 Windows sends a WebSocket PING at a fixed 10-second interval, independent of incoming state updates. The TV answers with PONG. This keeps the receiver's 30-second inbound socket timeout from expiring while the user watches or pauses without issuing commands. The sender cancels this task on disconnect; aiohttp's automatic heartbeat additionally detects an unresponsive peer when inbound traffic stops.
 
 | Direction | Type | Fields and behavior |
