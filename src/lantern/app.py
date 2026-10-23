@@ -15,12 +15,22 @@ from PySide6.QtGui import QAction, QColor, QFont, QFontDatabase, QIcon, QPainter
 from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSlider, QSpinBox, QStyle, QStyledItemDelegate, QSystemTrayIcon, QVBoxLayout, QWidget
 
 from .controller import Controller, Device, Discovery, validate_host
-from .library import Library, Subtitle
+from .library import Library, Subtitle, scan_files
 from .theme import COLORS, apply_theme
 
 
 def app_directory() -> Path:
     return Path(os.environ.get("LOCALAPPDATA", Path.home() / ".local" / "share")) / "LanternTV"
+
+
+def file_availability(items):
+    result = {}
+    for media_id, path in items:
+        try:
+            result[media_id] = Path(path).is_file()
+        except OSError:
+            result[media_id] = False
+    return result
 
 
 def icon() -> QIcon:
@@ -50,28 +60,59 @@ class Worker(QObject):
         self.loop = asyncio.new_event_loop()
         self.controller = Controller(cache, self.event.emit)
         self.ready = threading.Event()
+        self._started = asyncio.Event()
+        self._start_error = None
+        self._closing = threading.Event()
+        self._discovery_lock = threading.Lock()
+        self._import_lock = asyncio.Lock()
+        self._availability_revision = 0
+        self.discovery: Discovery | None = None
         self.thread = threading.Thread(target=self.run, daemon=True, name="lantern-network")
         self.thread.start()
-        self.discovery: Discovery | None = None
 
     def run(self):
         asyncio.set_event_loop(self.loop)
         try:
             self.loop.run_until_complete(self.controller.start())
         except Exception as error:
+            self._start_error = error
             self.event.emit("error", {"message": str(error)})
         finally:
             self.ready.set()
+            self._started.set()
         self.loop.run_forever()
+        pending = asyncio.all_tasks(self.loop)
+        for task in pending:
+            task.cancel()
+        if pending:
+            self.loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        self.loop.run_until_complete(self.loop.shutdown_asyncgens())
+        self.loop.run_until_complete(self.loop.shutdown_default_executor(timeout=3))
         self.loop.close()
 
     def submit(self, name: str, *args):
-        if not self.ready.wait(5):
-            self.event.emit("error", {"message": "The local media server could not start."})
+        if self._closing.is_set():
             return
         async def execute():
             try:
-                if name == "play":
+                await self._started.wait()
+                if self._start_error:
+                    raise RuntimeError(f"The local media server could not start: {self._start_error}")
+                if name == "import_files":
+                    async with self._import_lock:
+                        items = await asyncio.to_thread(scan_files, list(args[0]))
+                        if not self._closing.is_set():
+                            self.event.emit("library.imported", {"items": items})
+                elif name == "check_files":
+                    self._availability_revision += 1
+                    revision = self._availability_revision
+                    await asyncio.sleep(.05)
+                    if revision != self._availability_revision:
+                        return
+                    available = await asyncio.to_thread(file_availability, args[0])
+                    if revision == self._availability_revision and not self._closing.is_set():
+                        self.event.emit("library.availability", available)
+                elif name == "play":
                     self.controller.queue_play(*args)
                 else:
                     await getattr(self.controller, name)(*args)
@@ -83,23 +124,37 @@ class Worker(QObject):
     def scan(self):
         def discover():
             try:
-                if self.discovery:
-                    self.discovery.close()
-                self.discovery = Discovery(self.event.emit)
+                with self._discovery_lock:
+                    if self._closing.is_set():
+                        return
+                    if self.discovery:
+                        self.discovery.close()
+                    self.discovery = Discovery(self.event.emit)
             except Exception as error:
                 self.event.emit("error", {"message": f"Discovery failed: {error}. You can also connect by IP."})
         threading.Thread(target=discover, daemon=True).start()
 
     def close(self):
-        if self.discovery:
-            self.discovery.close()
-        future = asyncio.run_coroutine_threadsafe(self.controller.close(), self.loop)
+        if self._closing.is_set():
+            return
+        self._closing.set()
         try:
-            future.result(15)
+            with self._discovery_lock:
+                if self.discovery:
+                    self.discovery.close()
+                    self.discovery = None
+            future = asyncio.run_coroutine_threadsafe(self.controller.close(), self.loop)
+            try:
+                future.result(15)
+            except Exception:
+                future.cancel()
+                logging.exception("Shutdown did not finish cleanly")
         except Exception:
             logging.exception("Shutdown did not finish cleanly")
-        self.loop.call_soon_threadsafe(self.loop.stop)
-        self.thread.join(3)
+        finally:
+            self.loop.call_soon_threadsafe(self.loop.stop)
+            self.thread.join(5)
+            self.event.emit("worker.closed", {})
 
 
 class PlaylistDelegate(QStyledItemDelegate):
@@ -227,6 +282,8 @@ class Window(QMainWindow):
         self.resize(1120, 800)
         self.setMinimumSize(960, 720)
         self.library = Library(data / "library.sqlite3")
+        self._availability = {}
+        self._shutdown_complete = False
         self.worker = Worker(data / "cache")
         self.worker.event.connect(self.on_event)
         self.devices: dict[str, dict] = {}
@@ -257,6 +314,8 @@ class Window(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
         self.timer.start(1000)
+        if self.library.recovered_records:
+            self.status.setText("Some invalid library records were skipped and preserved for recovery.")
 
     def build_ui(self):
         root = QWidget()
@@ -390,13 +449,14 @@ class Window(QMainWindow):
 
     def sync_library(self):
         self.worker.submit("sync", [asdict(m) for m in self.library.items])
+        self.worker.submit("check_files", [(m.id, m.path) for m in self.library.items])
 
     def refresh_library(self):
         selected = self.selected_id()
         self.queue.clear()
         for media in self.library.items:
             suffix = Path(media.path).suffix[1:].upper()
-            item = QListWidgetItem(f"{media.title}\n{'Original file unavailable' if not media.exists else Path(media.path).name}")
+            item = QListWidgetItem(f"{media.title}\n{'Original file unavailable' if self._availability.get(media.id) is False else Path(media.path).name}")
             item.setData(Qt.ItemDataRole.UserRole, media.id)
             item.setData(int(Qt.ItemDataRole.UserRole) + 1, suffix)
             item.setToolTip(media.path)
@@ -417,12 +477,9 @@ class Window(QMainWindow):
         self.add_files(files)
 
     def add_files(self, files):
-        try:
-            self.library.add(files)
-        except ValueError as error:
-            self.show_error(str(error))
-        self.refresh_library()
-        self.sync_library()
+        if files:
+            self.status.setText("Adding files…")
+            self.worker.submit("import_files", list(files))
 
     def remove_selected(self):
         ids = [item.data(Qt.ItemDataRole.UserRole) for item in self.queue.selectedItems()]
@@ -534,7 +591,25 @@ class Window(QMainWindow):
             self.worker.submit("command", action, value)
 
     def on_event(self, event, data):
-        if event == "device":
+        if event == "worker.closed":
+            self.finish_quit()
+            return
+        if self.quitting:
+            return
+        if event == "library.imported":
+            try:
+                added = self.library.add_scanned(data["items"])
+                self.status.setText(f"Added {len(added)} file{'s' if len(added) != 1 else ''}")
+            except ValueError as error:
+                self.show_error(str(error))
+            self.refresh_library()
+            self.sync_library()
+        elif event == "library.availability":
+            available = {m.id: data.get(m.id, self._availability.get(m.id, True)) for m in self.library.items}
+            if available != self._availability:
+                self._availability = available
+                self.refresh_library()
+        elif event == "device":
             self.devices[data["id"]] = data
             selected = self.tv.currentData()
             self.tv.clear()
@@ -629,7 +704,14 @@ class Window(QMainWindow):
             return
         self.quitting = True
         self.timer.stop()
-        self.worker.close()
+        self.setEnabled(False)
+        self.status.setText("Closing Lantern…")
+        threading.Thread(target=self.worker.close, daemon=True, name="lantern-shutdown").start()
+
+    def finish_quit(self):
+        if self._shutdown_complete:
+            return
+        self._shutdown_complete = True
         self.library.close()
         self.tray.hide()
         if os.name == "nt":
@@ -646,6 +728,7 @@ def main():
     args.data_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(filename=args.data_dir / "lantern.log", level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     app = QApplication(sys.argv[:1])
+    app.setQuitOnLastWindowClosed(False)
     if os.name == "nt":
         # Qt's offscreen plugin does not always discover the Windows font store.
         for font_name in ("segoeui.ttf", "segoeuib.ttf", "seguisym.ttf"):
