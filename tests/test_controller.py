@@ -157,3 +157,101 @@ async def test_receiver_keepalive_survives_continuous_state_updates(aiohttp_serv
         await controller.close()
     assert keepalive.done()
     assert controller.receiver_keepalive_task is None
+
+
+async def test_replacement_play_waits_for_cancelled_job_cleanup(monkeypatch, tmp_path):
+    events = []
+    controller = Controller(tmp_path / "cache", lambda *args: None)
+    started = asyncio.Event()
+    cleaning = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    async def play(media_id, position=0):
+        events.append(media_id)
+        if media_id == "first":
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaning.set()
+                await release_cleanup.wait()
+                events.append("cleaned")
+
+    monkeypatch.setattr(controller, "_play", play)
+    controller.queue_play("first")
+    await asyncio.wait_for(started.wait(), 1)
+    controller.queue_play("second")
+    await asyncio.wait_for(cleaning.wait(), 1)
+    controller.queue_play("third")
+    await asyncio.sleep(0)
+    assert events == ["first"]
+    release_cleanup.set()
+    await asyncio.wait_for(controller.play_task, 1)
+    assert events == ["first", "cleaned", "third"]
+
+
+@pytest.mark.parametrize("transport", ["receiver", "cast"])
+async def test_failed_remote_stop_still_revokes_urls_and_cleans_cache(tmp_path, transport):
+    controller = Controller(tmp_path / "cache", lambda *args: None)
+    prepared = tmp_path / "cache" / "prepared.mp4"
+    prepared.write_bytes(b"prepared media")
+    controller.server.files["movie"] = prepared
+    controller.current_id = "movie"
+    controller.current_position = 42
+    token = controller.server.token
+
+    class FailedSocket:
+        closed = False
+        async def send_json(self, message):
+            raise ConnectionResetError("TV disconnected")
+
+    def failed_stop():
+        raise ConnectionResetError("Cast disconnected")
+
+    if transport == "receiver":
+        controller.ws = FailedSocket()
+    else:
+        controller.cast = SimpleNamespace(media_controller=SimpleNamespace(
+            status=SimpleNamespace(media_session_id=1), stop=failed_stop))
+    await controller.stop()
+    assert controller.server.token != token
+    assert not controller.server.files
+    assert not prepared.exists()
+    assert controller.current_id is None
+    assert controller.current_position == 0
+    await controller.stop()  # Cleanup remains safe after repeated Stop actions.
+
+
+async def test_connection_attempts_are_serialized(monkeypatch, tmp_path):
+    controller = Controller(tmp_path / "cache", lambda *args: None)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    order = []
+
+    async def connect(device, pin):
+        order.append(device["id"])
+        if device["id"] == "first":
+            entered.set()
+            await release.wait()
+
+    monkeypatch.setattr(controller, "_connect", connect)
+    first = asyncio.create_task(controller.connect({"id": "first"}))
+    await asyncio.wait_for(entered.wait(), 1)
+    second = asyncio.create_task(controller.connect({"id": "second"}))
+    await asyncio.sleep(0)
+    assert order == ["first"]
+    release.set()
+    await asyncio.wait_for(asyncio.gather(first, second), 1)
+    assert order == ["first", "second"]
+
+
+async def test_old_receiver_disconnect_does_not_close_replacement(monkeypatch, tmp_path):
+    controller = Controller(tmp_path / "cache", lambda *args: None)
+    old = object()
+    current = object()
+    controller.ws = current
+    async def unexpected_disconnect():
+        pytest.fail("A stale receiver must not disconnect the current session")
+    monkeypatch.setattr(controller, "_disconnect", unexpected_disconnect)
+    await controller.disconnect(expected_ws=old)
+    assert controller.ws is current

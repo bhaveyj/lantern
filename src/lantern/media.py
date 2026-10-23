@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import sys
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -65,6 +66,7 @@ class Preparation:
         self.quota = quota
         self.cache.mkdir(parents=True, exist_ok=True)
         self.process: asyncio.subprocess.Process | None = None
+        self._lock = asyncio.Lock()
         self.cleanup()
 
     def cleanup(self) -> bool:
@@ -84,6 +86,10 @@ class Preparation:
                 return
 
     async def prepare(self, path: Path, info: Probe, progress: Callable[[float], None]) -> Path:
+        async with self._lock:
+            return await self._prepare(path, info, progress)
+
+    async def _prepare(self, path: Path, info: Probe, progress: Callable[[float], None]) -> Path:
         if info.video and info.video not in {"h264", "hevc"}:
             raise ValueError(f"This route cannot play {info.video.upper()} video. Use H.264 or HEVC; video conversion is not included.")
         stat = path.stat()
@@ -91,7 +97,7 @@ class Preparation:
         destination = self.cache / f"{key}.mp4"
         if destination.is_file():
             return destination
-        partial = self.cache / f"{key}.part"
+        partial = self.cache / f"{key}-{uuid.uuid4().hex}.part"
         estimated = stat.st_size + int(max(info.duration, 1) * 24000)
         used = sum(p.stat().st_size for p in self.cache.glob("*.mp4"))
         if estimated > self.quota or used + estimated > self.quota:
