@@ -39,7 +39,7 @@ The checked-in build scripts target Windows PowerShell:
 - An Android TV/Google TV device or emulator for receiver testing. ADB authorization is required for installation.
 - Inno Setup 6 is optional and only needed for the Windows installer; the portable build and ZIP do not need it.
 
-The bootstrap script creates `.venv` and downloads project-local tools into `.tools`: Gradle 8.10.2, FFmpeg/ffprobe, Node, and the pinned JADX research tool. Existing Java and Android SDK installations are reused. Internet access is required for the first bootstrap.
+The bootstrap script creates `.venv` and downloads project-local build tools into `.tools`: Gradle 8.10.2 and FFmpeg/ffprobe. Existing Java and Android SDK installations are reused. Internet access is required for the first bootstrap. Node and the pinned JADX tool are optional; install them with `./scripts/bootstrap.ps1 -ResearchTools` when working on the research scripts.
 
 ## Clone and set up
 
@@ -53,7 +53,7 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ./scripts/bootstrap.ps1
 ```
 
-`bootstrap.ps1` creates the editable Python installation and installs the declared application and development dependencies. `requirements-lock.txt` records a tested resolved environment; it is not required for the normal bootstrap flow.
+`bootstrap.ps1` installs the tested Python versions from `requirements-lock.txt`, then creates the editable project installation using that environment. Windows packaging checks the installed versions against the lock before producing a distribution. Dependency upgrades should deliberately update the lock and pass the regression suite before packaging.
 
 Start the sender from the repository root:
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import argparse
 import json
 import re
 import shutil
@@ -39,7 +40,7 @@ def extract(archive: Path, directory: Path):
         bundle.extractall(directory)
 
 
-def main():
+def main(research: bool = False):
     records = json.loads((TOOLS / "downloads.json").read_text()) if (TOOLS / "downloads.json").exists() else {}
     cached_gradle = list((Path.home() / ".gradle" / "wrapper" / "dists" / "gradle-8.10.2-all").glob("*/gradle-8.10.2/bin/gradle.bat"))
     if not cached_gradle and not (TOOLS / "gradle-8.10.2" / "bin" / "gradle.bat").exists():
@@ -57,6 +58,13 @@ def main():
         for source in (TOOLS / "ffmpeg-download").rglob("*"):
             if source.is_file() and (source.name in {"ffmpeg.exe", "ffprobe.exe"} or source.suffix == ".dll" or "license" in source.name.lower()):
                 shutil.copy2(source, destination / source.name)
+    if research:
+        setup_research_tools(records)
+    (TOOLS / "downloads.json").write_text(json.dumps(records, indent=2))
+    print("Project-local tools ready", flush=True)
+
+
+def setup_research_tools(records):
     if not (TOOLS / "node" / "node.exe").exists():
         manifest = urllib.request.urlopen("https://nodejs.org/dist/latest-v24.x/SHASUMS256.txt").read().decode()
         digest, filename = next(line.split() for line in manifest.splitlines() if line.endswith("-win-x64.zip"))
@@ -65,9 +73,9 @@ def main():
         extract(archive, TOOLS / "node-download")
         shutil.copytree(TOOLS / "node-download" / filename.removesuffix(".zip"), TOOLS / "node", dirs_exist_ok=True)
     records["jadx"] = fetch("https://github.com/1013503897/jadx-headless-mcp/releases/download/v0.7.1/jadx-headless-mcp-0.7.1-all.jar", TOOLS / "jadx-headless-mcp.jar", "6e5eacf500b64292bfb73c49797c1958f6ee44646e43e868039ae7feb573ff75")
-    (TOOLS / "downloads.json").write_text(json.dumps(records, indent=2))
-    print("Project-local tools ready", flush=True)
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--research", action="store_true", help="Also install Node and JADX for the optional research scripts")
+    main(parser.parse_args().research)
