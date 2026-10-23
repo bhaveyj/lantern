@@ -29,4 +29,5 @@ dependencies {
     implementation("androidx.media3:media3-ui:1.6.1")
     implementation("org.nanohttpd:nanohttpd-websocket:2.3.1")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }

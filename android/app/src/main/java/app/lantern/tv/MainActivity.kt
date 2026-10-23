@@ -65,6 +65,7 @@ class MainActivity : Activity() {
     private var registration: NsdManager.RegistrationListener? = null
     private var multicast: WifiManager.MulticastLock? = null
     private var connected = false
+    private var destroyed = false
     private var captionFontScale = 1f
     private val bg = TvTheme.background
     private val ink = TvTheme.text
@@ -104,7 +105,13 @@ class MainActivity : Activity() {
             }
             override fun onTracksChanged(tracks: Tracks) { applySubtitle() }
         })
-        server = ControlServer(gate, { message -> handler.post { handle(message) } }, { name -> handler.post {
+        server = ControlServer(gate, { message, isCurrent -> handler.post {
+            if (!destroyed && isCurrent()) {
+                try { handle(message) }
+                catch (_: Exception) { server.publish(JSONObject().put("type", "error").put("code", "COMMAND_FAILED").put("message", "The TV could not apply this playback command. Try playing the file again.")) }
+            }
+        } }, { name -> handler.post {
+            if (destroyed) return@post
             connected = name != null
             welcomeBrowse.visibility = if (connected) View.VISIBLE else View.GONE
             if (connected) welcomeBrowse.requestFocus()
@@ -427,6 +434,7 @@ class MainActivity : Activity() {
 
     override fun onPause() { super.onPause(); player.pause() }
     override fun onDestroy() {
+        destroyed = true
         handler.removeCallbacksAndMessages(null)
         registration?.let { try { nsd?.unregisterService(it) } catch (_: Exception) { } }
         if (::server.isInitialized) server.shutdown()
