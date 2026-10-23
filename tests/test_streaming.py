@@ -1,9 +1,13 @@
 import os
 import subprocess
+import gc
+import threading
+import weakref
 
 from aiohttp import ClientSession
 
 from lantern.server import MediaServer
+from lantern.media import subtitle_vtt
 
 
 async def test_stream_requires_token_supports_range_and_rotates(aiohttp_client, tmp_path):
@@ -72,3 +76,65 @@ async def test_large_file_open_ranges_and_seek_beyond_four_gib(aiohttp_client, t
         assert response.status == 206
         assert response.headers["Content-Range"] == f"bytes {offset}-{size - 1}/{size}"
         assert await response.read() == end
+
+
+async def test_subtitle_conversion_is_cached_off_loop_and_invalidated(aiohttp_client, tmp_path, monkeypatch):
+    source = tmp_path / "movie.srt"
+    source.write_text("1\n00:00:01,000 --> 00:00:02,000\nOriginal\n", encoding="utf-8")
+    calls = []
+    event_loop_thread = threading.get_ident()
+    def convert(path):
+        calls.append(threading.get_ident())
+        return subtitle_vtt(path)
+    monkeypatch.setattr("lantern.server.subtitle_vtt", convert)
+    server = MediaServer()
+    server.subtitles["english"] = source
+    client = await aiohttp_client(server.app)
+    route = f"/subtitle/{server.token}/english"
+    for _ in range(2):
+        response = await client.get(route)
+        assert "Original" in await response.text()
+    assert len(calls) == 1
+    assert calls[0] != event_loop_thread
+    source.write_text("1\n00:00:01,000 --> 00:00:02,000\nUpdated captions\n", encoding="utf-8")
+    response = await client.get(route)
+    assert "Updated captions" in await response.text()
+    assert len(calls) == 2
+
+
+def test_finished_streaming_transports_are_not_retained():
+    class Transport:
+        def close(self): pass
+    server = MediaServer()
+    transport = Transport()
+    reference = weakref.ref(transport)
+    server.transports.add(transport)
+    del transport
+    gc.collect()
+    assert reference() is None
+
+
+async def test_stop_revokes_subtitle_request_during_conversion(aiohttp_client, tmp_path, monkeypatch):
+    source = tmp_path / "movie.srt"
+    source.write_text("captions", encoding="utf-8")
+    server = MediaServer()
+    server.subtitles["english"] = source
+    started = threading.Event()
+    release = threading.Event()
+    def convert(path):
+        started.set()
+        release.wait(2)
+        return "WEBVTT\n\nold session"
+    monkeypatch.setattr("lantern.server.subtitle_vtt", convert)
+    client = await aiohttp_client(server.app)
+    import asyncio
+    request = asyncio.create_task(client.get(f"/subtitle/{server.token}/english"))
+    try:
+        assert await asyncio.to_thread(started.wait, 1)
+        server.reset()
+        release.set()
+        response = await request
+        assert response.status == 404
+        assert not server._subtitle_cache
+    finally:
+        release.set()

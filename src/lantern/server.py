@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import secrets
+import weakref
+from collections import OrderedDict
 from pathlib import Path
 
 from aiohttp import web
@@ -24,7 +27,10 @@ class MediaServer:
         self.subtitles: dict[str, Path] = {}
         self.runner: web.AppRunner | None = None
         self.port = 0
-        self.transports = set()
+        self.transports = weakref.WeakSet()
+        self._subtitle_cache = OrderedDict()
+        self._subtitle_cache_bytes = 0
+        self._subtitle_lock = asyncio.Lock()
         self.app = web.Application(middlewares=[self.cors])
         self.app.router.add_get("/stream/{token}/{id}", self.stream)
         self.app.router.add_get("/subtitle/{token}/{id}", self.subtitle)
@@ -58,6 +64,9 @@ class MediaServer:
         if path is None or not path.is_file():
             raise web.HTTPNotFound()
         if request.transport:
+            for transport in list(self.transports):
+                if transport.is_closing():
+                    self.transports.discard(transport)
             self.transports.add(request.transport)
         types = {".mp4": "video/mp4", ".m4v": "video/mp4", ".mkv": "video/x-matroska", ".ts": "video/mp2t", ".m2ts": "video/mp2t", ".aac": "audio/aac", ".m4a": "audio/mp4"}
         headers = {"Cache-Control": "no-store"}
@@ -70,7 +79,34 @@ class MediaServer:
         path = self.subtitles.get(request.match_info["id"])
         if path is None or not path.is_file():
             raise web.HTTPNotFound()
-        return web.Response(text=subtitle_vtt(path), content_type="text/vtt", headers={"Cache-Control": "no-store"})
+        async with self._subtitle_lock:
+            converted = await self.converted_subtitle(request, path)
+        return web.Response(text=converted, content_type="text/vtt", headers={"Cache-Control": "no-store"})
+
+    async def converted_subtitle(self, request: web.Request, path: Path):
+        try:
+            stat = await asyncio.to_thread(path.stat)
+            self.authorized(request)
+            if stat.st_size > 8 * 1024**2:
+                raise web.HTTPRequestEntityTooLarge(max_size=8 * 1024**2, actual_size=stat.st_size)
+            key = (str(path), stat.st_size, stat.st_mtime_ns)
+            converted = self._subtitle_cache.get(key)
+            if converted is None:
+                converted = await asyncio.to_thread(subtitle_vtt, path)
+                self.authorized(request)
+                size = len(converted.encode("utf-8"))
+                if size <= 8 * 1024**2:
+                    while self._subtitle_cache and (len(self._subtitle_cache) >= 32 or self._subtitle_cache_bytes + size > 8 * 1024**2):
+                        _, old = self._subtitle_cache.popitem(last=False)
+                        self._subtitle_cache_bytes -= len(old.encode("utf-8"))
+                    self._subtitle_cache[key] = converted
+                    self._subtitle_cache_bytes += size
+            else:
+                self._subtitle_cache.move_to_end(key)
+        except (FileNotFoundError, PermissionError):
+            raise web.HTTPNotFound() from None
+        self.authorized(request)  # Stop may revoke the token during conversion.
+        return converted
 
     async def start(self) -> None:
         self.runner = web.AppRunner(self.app, access_log=None)
@@ -84,12 +120,14 @@ class MediaServer:
             await self.runner.cleanup()
 
     def reset(self) -> None:
-        for transport in self.transports:
+        for transport in list(self.transports):
             transport.close()
         self.transports.clear()
         self.token = secrets.token_urlsafe(32)
         self.files.clear()
         self.subtitles.clear()
+        self._subtitle_cache.clear()
+        self._subtitle_cache_bytes = 0
 
     def url(self, host: str, media_id: str) -> str:
         return f"http://{host}:{self.port}/stream/{self.token}/{media_id}"
