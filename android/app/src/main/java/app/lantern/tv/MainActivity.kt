@@ -33,6 +33,7 @@ import androidx.media3.exoplayer.RenderersFactory
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.text.TextRenderer
 import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
 import androidx.media3.ui.SubtitleView
 import org.json.JSONArray
@@ -196,6 +197,12 @@ class MainActivity : Activity() {
         playerView = PlayerView(this).apply { player = this@MainActivity.player; useController = false }
         val captions = getSystemService(CAPTIONING_SERVICE) as? CaptioningManager
         captionFontScale = if (captions?.isEnabled == true) captions.fontScale else 1f
+        val captionStyle = if (captions?.isEnabled == true) CaptionStyleCompat.createFromCaptionStyle(captions.userStyle) else CaptionStyleCompat.DEFAULT
+        playerView.subtitleView?.apply {
+            setApplyEmbeddedStyles(false)
+            setStyle(CaptionStyleCompat(captionStyle.foregroundColor, Color.TRANSPARENT, Color.TRANSPARENT,
+                CaptionStyleCompat.EDGE_TYPE_OUTLINE, Color.BLACK, captionStyle.typeface))
+        }
         playerView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> if (::controls.isInitialized) updateCaptionInset() }
         root.addView(playerView, FrameLayout.LayoutParams(-1, -1))
         welcome = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(40), dp(24), dp(40), dp(20)); setBackgroundColor(bg) }
@@ -392,7 +399,7 @@ class MainActivity : Activity() {
             // Use the full video surface, not the smaller padded subtitle canvas.
             // This keeps the user's caption size stable while the HUD is visible.
             if (playerView.height > 0) captions.setFixedTextSize(TypedValue.COMPLEX_UNIT_PX, playerView.height * SubtitleView.DEFAULT_TEXT_SIZE_FRACTION * captionFontScale)
-            val inset = if (controls.visibility == View.VISIBLE) controls.height + dp(20) else 0
+            val inset = dp(24) + if (controls.visibility == View.VISIBLE) controls.height + dp(20) else 0
             if (captions.paddingBottom != inset) captions.setPadding(captions.paddingLeft, captions.paddingTop, captions.paddingRight, inset)
         }
     }
