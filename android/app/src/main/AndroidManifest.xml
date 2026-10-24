@@ -6,7 +6,7 @@
     <uses-feature android:name="android.software.leanback" android:required="true" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
     <application android:label="Lantern TV" android:theme="@style/LanternTheme" android:usesCleartextTraffic="true" android:allowBackup="false" android:icon="@drawable/lantern_icon" android:banner="@drawable/tv_banner" android:supportsRtl="true">
-        <activity android:name=".MainActivity" android:screenOrientation="landscape" android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize" android:exported="true">
+        <activity android:name=".MainActivity" android:launchMode="singleTask" android:screenOrientation="landscape" android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />

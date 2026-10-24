@@ -38,8 +38,14 @@ import java.net.NetworkInterface
 
 @androidx.media3.common.util.UnstableApi
 class MainActivity : Activity() {
+    companion object {
+        // Keep the PIN's lifetime and failed-attempt limits across screen recreation.
+        // No Activity or other Android context is retained by the gate.
+        private val sessionGate = PairingGate()
+    }
+
     private val handler = Handler(Looper.getMainLooper())
-    private val gate = PairingGate()
+    private val gate = sessionGate
     private lateinit var server: ControlServer
     private lateinit var player: ExoPlayer
     private lateinit var playerView: PlayerView
@@ -82,6 +88,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        gate.refresh()
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
         player = ExoPlayer.Builder(this).build()
