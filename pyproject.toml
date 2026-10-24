@@ -12,6 +12,8 @@ dependencies = [
   "aiohttp>=3.11,<4",
   "zeroconf>=0.140,<1",
   "PyChromecast>=14,<15",
+  "faster-whisper>=1.2,<2",
+  "av>=16,<17",
 ]
 
 [project.optional-dependencies]

@@ -127,6 +127,8 @@ class Worker(QObject):
                         self.event.emit("subtitles.inspection_failed", {"media_id": media_id, "source": source, "message": str(error)})
                 elif name == "subtitle_extract":
                     self.subtitle_jobs.start_extraction(*args)
+                elif name == "subtitle_local":
+                    self.subtitle_jobs.start_local(*args)
                 elif name == "subtitle_cancel":
                     await self.subtitle_jobs.cancel()
                 else:

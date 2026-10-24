@@ -1,4 +1,5 @@
 import asyncio
+import sys
 from pathlib import Path
 
 import pytest
@@ -66,3 +67,49 @@ async def test_cancellation_waits_for_job_cleanup_and_never_publishes_a_result(t
     assert events[-1] == "subtitles.finished"
     with pytest.raises(ValueError, match="closing"):
         jobs.start("other", "other.mkv", operation)
+
+
+async def test_cancelling_local_worker_terminates_the_actual_process(monkeypatch, tmp_path):
+    monkeypatch.setattr("lantern.subtitle_jobs.worker_command", lambda _: [sys.executable, "-c", "import time; time.sleep(60)"])
+    jobs = SubtitleJobs(tmp_path, lambda *_: None)
+    task = asyncio.create_task(jobs.local_worker(tmp_path, {}))
+    for _ in range(100):
+        if jobs.worker_process is not None:
+            break
+        await asyncio.sleep(.01)
+    process = jobs.worker_process
+    assert process is not None
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 3)
+    assert process.returncode is not None
+    assert jobs.worker_process is None
+
+
+async def test_local_results_survive_cleanup_and_cache_is_source_and_audio_specific(monkeypatch, tmp_path):
+    source = await make_embedded_fixture(tmp_path)
+    jobs = SubtitleJobs(tmp_path / "subtitles", lambda *_: None)
+    calls = []
+    async def extract(source, output, *args):
+        output.write_bytes(b"audio fixture")
+    async def worker(folder, request):
+        calls.append(request)
+        Path(request["output"]).write_text("1\n00:00:00,100 --> 00:00:01,000\nनमस्ते\n", encoding="utf-8")
+        return {"language": "hi", "cues": 1}
+    monkeypatch.setattr(jobs, "extract_audio", extract)
+    monkeypatch.setattr(jobs, "local_worker", worker)
+    options = {"model": "small", "language": "hi", "audio_index": 0}
+    first = await jobs.generate_local(source, options)
+    second = await jobs.generate_local(source, {**options, "threads": 4})
+    assert second["reused"] and len(calls) == 1
+    assert not list((jobs.root / "jobs").iterdir())
+    await jobs.close()
+    assert Path(first["path"]).is_file()
+    assert calls[0]["threads"] == 2
+    assert not calls[0]["allow_download"]
+    source.touch()
+    other_jobs = SubtitleJobs(jobs.root, lambda *_: None)
+    monkeypatch.setattr(other_jobs, "extract_audio", extract)
+    monkeypatch.setattr(other_jobs, "local_worker", worker)
+    third = await other_jobs.generate_local(source, options)
+    assert third["path"] != first["path"] and len(calls) == 2

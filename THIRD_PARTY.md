@@ -9,6 +9,12 @@ Lantern-authored source is MIT licensed. External software keeps its own license
 | aiohttp | Apache 2.0 | https://github.com/aio-libs/aiohttp |
 | python-zeroconf | LGPL 2.1+ | https://github.com/python-zeroconf/python-zeroconf |
 | PyChromecast | MIT | https://github.com/home-assistant-libs/pychromecast |
+| faster-whisper / CTranslate2 | MIT | https://github.com/SYSTRAN/faster-whisper and https://github.com/OpenNMT/CTranslate2 |
+| Whisper model weights (optional downloads) | MIT | https://github.com/openai/whisper |
+| ONNX Runtime | MIT | https://github.com/microsoft/onnxruntime |
+| PyAV | BSD 3-Clause; bundled FFmpeg libraries retain their own notices | https://github.com/PyAV-Org/PyAV |
+| Hugging Face Hub / Tokenizers | Apache 2.0 | https://github.com/huggingface/huggingface_hub and https://github.com/huggingface/tokenizers |
+| NumPy | BSD 3-Clause | https://github.com/numpy/numpy |
 | Media3 | Apache 2.0 | https://github.com/androidx/media |
 | NanoHTTPD / NanoWSD | BSD 3-Clause | https://github.com/NanoHttpd/nanohttpd |
 | FFmpeg | Depends on build; Gyan essentials is GPL v3+; BtbN LGPL builds are available | https://ffmpeg.org/ and https://www.gyan.dev/ffmpeg/builds/ |

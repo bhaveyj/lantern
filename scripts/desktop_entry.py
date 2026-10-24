@@ -5,6 +5,9 @@ import traceback
 from pathlib import Path
 
 if __name__ == '__main__':
+    if '--subtitle-worker' in sys.argv:
+        from lantern.subtitle_worker import main as subtitle_main
+        sys.exit(subtitle_main(Path(sys.argv[sys.argv.index('--subtitle-worker') + 1])))
     directory = Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'LanternTV'
     if '--data-dir' in sys.argv:
         directory = Path(sys.argv[sys.argv.index('--data-dir') + 1])
