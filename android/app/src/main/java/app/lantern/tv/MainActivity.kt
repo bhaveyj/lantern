@@ -27,7 +27,11 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.RenderersFactory
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.text.TextRenderer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import androidx.media3.ui.SubtitleView
@@ -91,7 +95,17 @@ class MainActivity : Activity() {
         gate.refresh()
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-        player = ExoPlayer.Builder(this).build()
+        // Media3 1.6.1's extracted cue samples can lose an in-progress cue
+        // after a seek. Its supported legacy path retains the whole subtitle.
+        val defaults = DefaultRenderersFactory(this)
+        val renderers = RenderersFactory { outputHandler, video, audio, text, metadata ->
+            defaults.createRenderers(outputHandler, video, audio, text, metadata).also { built ->
+                built.filterIsInstance<TextRenderer>().forEach { it.experimentalSetLegacyDecodingEnabled(true) }
+            }
+        }
+        player = ExoPlayer.Builder(this, renderers)
+            .setMediaSourceFactory(DefaultMediaSourceFactory(this).experimentalParseSubtitlesDuringExtraction(false))
+            .build()
         createUi()
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) { updateState() }
@@ -257,7 +271,13 @@ class MainActivity : Activity() {
                     current = JSONObject(updated.toString()).put("url", previous.getString("url"))
                     subtitleSelection.accept(updated.subtitleId(), updated.optLong("subtitleRevision", 0))
                     if (tracksChanged) {
-                        player.replaceMediaItem(player.currentMediaItemIndex, mediaItem(current!!))
+                        // Media3 treats replaceMediaItem as a metadata update for the
+                        // same URI, so rebuild the source to include new subtitle files.
+                        val position = player.currentPosition.coerceAtLeast(0)
+                        val autoplay = player.playWhenReady
+                        player.setMediaItem(mediaItem(current!!), position)
+                        player.playWhenReady = autoplay
+                        player.prepare()
                     }
                     applySubtitle()
                 }
@@ -308,8 +328,9 @@ class MainActivity : Activity() {
 
     private fun applySubtitle() {
         val builder = player.trackSelectionParameters.buildUpon().clearOverridesOfType(C.TRACK_TYPE_TEXT).setTrackTypeDisabled(C.TRACK_TYPE_TEXT, selectedSubtitle == null)
-        if (selectedSubtitle != null) {
-            val group = player.currentTracks.groups.firstOrNull { group -> group.type == C.TRACK_TYPE_TEXT && group.getTrackFormat(0).id == selectedSubtitle }
+        val subtitleId = selectedSubtitle
+        if (subtitleId != null) {
+            val group = player.currentTracks.groups.firstOrNull { group -> group.type == C.TRACK_TYPE_TEXT && matchesSubtitleTrack(group.getTrackFormat(0).id, subtitleId) }
             if (group != null) builder.setOverrideForType(TrackSelectionOverride(group.mediaTrackGroup, 0))
         }
         val parameters = builder.build()

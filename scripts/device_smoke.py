@@ -23,7 +23,14 @@ async def run(args):
     subtitle = video.with_suffix(".srt")
     subtitle.write_text("1\n00:00:00,000 --> 00:00:40,000\nLantern: streaming from your Windows PC\n", encoding="utf-8")
     items = [{"id": name, "title": title, "path": str(video), "subtitles": [{"id": "en", "label": "English", "path": str(subtitle)}], "selected_subtitle": "en"} for name, title in [("sample-one", "Lantern · playback check"), ("sample-two", "Lantern · playlist check")]]
+    if not args.cast:
+        items[0].update(subtitles=[], selected_subtitle=None)
     controller = Controller(root / ".tmp" / "device-cache", event)
+    subtitle_responses = []
+    async def record_subtitle(request, response):
+        if request.path.startswith("/subtitle/"):
+            subtitle_responses.append(response.status)
+    controller.server.app.on_response_prepare.append(record_subtitle)
     await controller.start()
 
     async def state_matches(predicate, description, timeout=18):
@@ -48,6 +55,17 @@ async def run(args):
         await controller.command("seek", 12)
         await controller.command("pause")
         await state_matches(lambda s: not s.get("playing") and 10 <= s.get("position", 0) <= 16, "seek and pause")
+        if not args.cast:
+            items[0]["subtitles"] = items[1]["subtitles"]
+            await controller.sync(items)
+            await controller.subtitle("sample-one", "en")
+            await state_matches(lambda s: s.get("subtitleId") == "en" and not s.get("playing") and 10 <= s.get("position", 0) <= 16, "attach new captions while paused")
+            for _ in range(60):
+                if 200 in subtitle_responses:
+                    break
+                await asyncio.sleep(.25)
+            assert 200 in subtitle_responses, "Receiver selected captions but never fetched the WebVTT file"
+            print("PASS receiver fetched newly attached captions", flush=True)
         await controller.command("play")
         await state_matches(lambda s: s.get("playing"), "resume")
         if not args.cast:

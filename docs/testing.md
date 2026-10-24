@@ -63,3 +63,15 @@ Windows executable as well as source execution: its hidden worker must finish,
 release its process and attach a saved subtitle. Review recognition accuracy
 separately on representative English and Hindi dialogue, including music and
 overlapping voices. Synthetic speech checks are not movie-accuracy benchmarks.
+
+The physical receiver smoke test also starts without an external subtitle track,
+then attaches one while paused. It verifies that the receiver fetches the WebVTT
+file and preserves position and pause state. This catches Media3 merged-track ID
+prefixes and source updates that otherwise report a selected track without
+loading captions. Visually check both English and Devanagari text on the TV,
+including switching captions off and back on and seeking within a cue.
+
+The pinned Media3 1.6.1 receiver uses its supported legacy subtitle decoder to
+retain in-progress cues after seeks. Recheck this compatibility path when
+upgrading Media3, since the legacy APIs are deprecated upstream. Resume playback
+after a paused seek so the decoder can publish the active cue.

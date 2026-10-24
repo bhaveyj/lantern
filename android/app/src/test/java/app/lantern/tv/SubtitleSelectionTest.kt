@@ -4,6 +4,21 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SubtitleSelectionTest {
+    @Test fun externalTrackIdsMatchMedia3MergedSourcePrefixes() {
+        assertTrue(matchesSubtitleTrack("1:generated-en", "generated-en"))
+        assertTrue(matchesSubtitleTrack("2:generated-hi", "generated-hi"))
+        assertTrue(matchesSubtitleTrack("1:custom:track", "custom:track"))
+        assertTrue(matchesSubtitleTrack("generated-en", "generated-en"))
+    }
+
+    @Test fun otherTracksCannotMatchSelectedExternalCaption() {
+        assertFalse(matchesSubtitleTrack(null, "generated-en"))
+        assertFalse(matchesSubtitleTrack("0:generated-en", "generated-en"))
+        assertFalse(matchesSubtitleTrack("1:other-generated-en", "generated-en"))
+        assertFalse(matchesSubtitleTrack("invalid:generated-en", "generated-en"))
+        assertFalse(matchesSubtitleTrack("-1:generated-en", "generated-en"))
+    }
+
     @Test fun delayedSnapshotsCannotUndoRemoteSelection() {
         val state = SubtitleSelection()
         state.reset("english", 4)
