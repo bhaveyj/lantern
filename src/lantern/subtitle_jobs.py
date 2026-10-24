@@ -118,6 +118,26 @@ class SubtitleJobs:
     def busy(self):
         return self.task is not None and not self.task.done()
 
+    async def cleanup_stale(self):
+        def cleanup():
+            jobs = self.root / "jobs"
+            if not jobs.is_dir():
+                return
+            expected = {"audio.flac", "request.json", "state.json", "state.tmp", "result.srt", "metadata.json"}
+            for folder in jobs.iterdir():
+                if not re.fullmatch(r"[0-9a-f]{32}", folder.name) or not folder.is_dir() or folder.resolve().parent != jobs.resolve():
+                    continue
+                try:
+                    files = list(folder.iterdir())
+                    if any(file.name not in expected or not file.is_file() for file in files):
+                        continue
+                    for file in files:
+                        file.unlink(missing_ok=True)
+                    folder.rmdir()
+                except OSError:
+                    continue  # An antivirus scanner or exiting worker may still hold a file.
+        await asyncio.to_thread(cleanup)
+
     def start_extraction(self, media_id: str, source: str, track_index: int):
         self.start(media_id, source, self.extract, track_index)
 
@@ -175,8 +195,11 @@ class SubtitleJobs:
         destination = folder / f"{cache_key(stamp, 'embedded-v1', track_index)}.srt"
         label = f"{track.label} · Embedded"
         if await asyncio.to_thread(destination.is_file):
-            await asyncio.to_thread(validate_subtitle, destination)
-            return {"path": str(destination), "label": label, "reused": True}
+            try:
+                await asyncio.to_thread(validate_subtitle, destination)
+                return {"path": str(destination), "label": label, "reused": True}
+            except (OSError, ValueError):
+                pass  # Recover an incomplete/damaged cached artifact by extracting again.
         partial = folder / f"{uuid.uuid4().hex}.part"
         self.emit("subtitles.progress", {"message": "Extracting embedded subtitles…", "percent": None})
         try:
@@ -281,9 +304,13 @@ class SubtitleJobs:
         destination = folder / f"{key}.srt"
         metadata = folder / f"{key}.json"
         if await asyncio.to_thread(destination.is_file) and await asyncio.to_thread(metadata.is_file):
-            await asyncio.to_thread(validate_subtitle, destination)
-            record = json.loads(await asyncio.to_thread(metadata.read_text, encoding="utf-8"))
-            return {"path": str(destination), "label": record["label"], "reused": True}
+            try:
+                await asyncio.to_thread(validate_subtitle, destination)
+                record = json.loads(await asyncio.to_thread(metadata.read_text, encoding="utf-8"))
+                if isinstance(record["label"], str):
+                    return {"path": str(destination), "label": record["label"], "reused": True}
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
         job = self.root / "jobs" / uuid.uuid4().hex
         await asyncio.to_thread(job.mkdir, parents=True, exist_ok=True)
         try:

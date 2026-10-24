@@ -2,6 +2,7 @@ import asyncio
 import os
 import threading
 
+import aiohttp
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
@@ -132,6 +133,44 @@ async def test_subtitle_dialog_defaults_to_local_eco_and_cloud_requires_key(qt_a
         assert "US$0.62" in dialog.explanation.text()
         dialog.reject()
         assert not dialog.api_key.text()
+    finally:
+        window.quit()
+        await qt_wait(qt_app, lambda: window._shutdown_complete)
+
+
+async def test_locked_subtitle_cleanup_does_not_disable_playback_worker(qt_app, monkeypatch, tmp_path):
+    async def locked_cleanup(jobs):
+        raise PermissionError("locked old subtitle directory")
+    monkeypatch.setattr("lantern.app.SubtitleJobs.cleanup_stale", locked_cleanup)
+    worker = Worker(tmp_path / "cache")
+    try:
+        result = worker.submit("sync", [])
+        await asyncio.wait_for(asyncio.wrap_future(result), 3)
+        assert worker._start_error is None
+    finally:
+        await asyncio.to_thread(worker.close)
+
+
+async def test_created_hindi_subtitles_are_served_as_webvtt_through_real_worker(qt_app, tmp_path):
+    source = tmp_path / "movie.mp4"
+    source.touch()
+    subtitle = tmp_path / "generated.srt"
+    subtitle.write_text("1\n00:00:00,100 --> 00:00:02,000\nनमस्ते दुनिया।\n", encoding="utf-8")
+    window = Window(tmp_path / "data", discover=False)
+    try:
+        media = window.library.add([str(source)])[0]
+        window.refresh_library()
+        window.on_event("subtitles.ready", {"media_id": media.id, "source": media.path, "path": str(subtitle), "label": "Hindi · AI generated"})
+        await asyncio.wait_for(asyncio.wrap_future(window.worker.submit("sync", [__import__("dataclasses").asdict(media)])), 3)
+        url = window.worker.controller.server.subtitle_url("127.0.0.1", media.selected_subtitle)
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                assert response.status == 200
+                text = await response.text()
+                assert text.startswith("WEBVTT")
+                assert "00:00:00.100 --> 00:00:02.000" in text
+                assert "नमस्ते दुनिया।" in text
+        assert source.read_bytes() == b""
     finally:
         window.quit()
         await qt_wait(qt_app, lambda: window._shutdown_complete)

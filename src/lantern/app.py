@@ -79,6 +79,10 @@ class Worker(QObject):
         asyncio.set_event_loop(self.loop)
         try:
             self.loop.run_until_complete(self.controller.start())
+            try:
+                self.loop.run_until_complete(self.subtitle_jobs.cleanup_stale())
+            except OSError:
+                logging.warning("Old subtitle temporary files could not be cleaned; playback is still available.")
         except Exception as error:
             self._start_error = error
             self.event.emit("error", {"message": str(error)})

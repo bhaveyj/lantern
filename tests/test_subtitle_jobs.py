@@ -113,3 +113,24 @@ async def test_local_results_survive_cleanup_and_cache_is_source_and_audio_speci
     monkeypatch.setattr(other_jobs, "local_worker", worker)
     third = await other_jobs.generate_local(source, options)
     assert third["path"] != first["path"] and len(calls) == 2
+    Path(third["path"]).with_suffix(".json").write_text("{broken", encoding="utf-8")
+    repaired = await other_jobs.generate_local(source, options)
+    assert not repaired["reused"] and len(calls) == 3
+
+
+async def test_restart_cleanup_removes_only_known_abandoned_job_files(tmp_path):
+    jobs = SubtitleJobs(tmp_path, lambda *_: None)
+    stale = tmp_path / "jobs" / ("a" * 32)
+    stale.mkdir(parents=True)
+    (stale / "audio.flac").write_bytes(b"temporary audio")
+    (stale / "request.json").write_text("{}")
+    unrelated = tmp_path / "jobs" / ("b" * 32)
+    unrelated.mkdir()
+    (unrelated / "personal.txt").write_text("keep")
+    model = tmp_path / "models" / "model.bin"
+    model.parent.mkdir()
+    model.write_bytes(b"saved model")
+    await jobs.cleanup_stale()
+    assert not stale.exists()
+    assert (unrelated / "personal.txt").read_text() == "keep"
+    assert model.read_bytes() == b"saved model"
