@@ -86,3 +86,27 @@ async def test_missing_file_status_is_checked_in_background(qt_app, tmp_path):
     finally:
         window.quit()
         await qt_wait(qt_app, lambda: window._shutdown_complete)
+
+
+async def test_created_subtitle_attaches_once_and_ignores_removed_sources(qt_app, tmp_path):
+    source = tmp_path / "movie.mp4"
+    source.touch()
+    subtitle = tmp_path / "created.srt"
+    subtitle.write_text("1\n00:00:00,000 --> 00:00:01,000\nनमस्ते\n", encoding="utf-8")
+    window = Window(tmp_path / "data", discover=False)
+    try:
+        media = window.library.add([str(source)])[0]
+        window.refresh_library()
+        data = {"media_id": media.id, "source": media.path, "path": str(subtitle), "label": "Hindi · Embedded"}
+        window.on_event("subtitles.ready", data)
+        window.on_event("subtitles.ready", data)
+        assert len(media.subtitles) == 1
+        assert media.selected_subtitle == media.subtitles[0].id
+        assert media.subtitles[0].path == str(subtitle)
+        window.library.remove([media.id])
+        window.refresh_library()
+        window.on_event("subtitles.ready", data)
+        assert not window.library.items
+    finally:
+        window.quit()
+        await qt_wait(qt_app, lambda: window._shutdown_complete)

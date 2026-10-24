@@ -148,6 +148,8 @@ Lantern probes media with FFmpeg/ffprobe and caches inspection results until the
 
 SRT and WebVTT files are discovered when they share a base name with the video or live in a neighboring `Subs` or `Subtitles` directory. A subtitle can also be selected manually. The custom receiver can switch external tracks during playback; Cast applies the selected subtitle when the item is played again.
 
+Choose **Create subtitles…** to inspect a file for embedded subtitle tracks. Text tracks can be extracted to a persistent SRT file and attached automatically without modifying the original media. Image subtitles require OCR or speech transcription. Extraction runs in the background, supports cancellation, and reuses saved results until the source file changes. Saved subtitles are separate from the temporary playback cache.
+
 ## Network and security model
 
 The custom receiver advertises `_lantern._tcp.local.` and listens on TCP port `8765`. The sender opens a WebSocket at `/control`, pairs with the six-digit TV PIN, and sends a fixed WebSocket PING every 10 seconds to keep the receiver alive during quiet playback. The sender's media server listens on an available TCP port and exposes only explicitly added files using random session tokens and byte-range support.

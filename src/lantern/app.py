@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 import threading
+import uuid
 from dataclasses import asdict
 from pathlib import Path
 
@@ -16,6 +17,8 @@ from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QDialogButtonBox
 
 from .controller import Controller, Device, Discovery, validate_host
 from .library import Library, Subtitle, scan_files
+from .subtitle_dialog import SubtitleDialog
+from .subtitle_jobs import SubtitleJobs, inspect_media
 from .theme import COLORS, apply_theme
 
 
@@ -59,6 +62,7 @@ class Worker(QObject):
         super().__init__()
         self.loop = asyncio.new_event_loop()
         self.controller = Controller(cache, self.event.emit)
+        self.subtitle_jobs = SubtitleJobs(cache.parent / "subtitles", self.event.emit)
         self.ready = threading.Event()
         self._started = asyncio.Event()
         self._start_error = None
@@ -114,6 +118,17 @@ class Worker(QObject):
                         self.event.emit("library.availability", available)
                 elif name == "play":
                     self.controller.queue_play(*args)
+                elif name == "subtitle_inspect":
+                    media_id, source = args
+                    try:
+                        inspection = await inspect_media(Path(source))
+                        self.event.emit("subtitles.inspected", {"media_id": media_id, "source": source, "inspection": asdict(inspection)})
+                    except Exception as error:
+                        self.event.emit("subtitles.inspection_failed", {"media_id": media_id, "source": source, "message": str(error)})
+                elif name == "subtitle_extract":
+                    self.subtitle_jobs.start_extraction(*args)
+                elif name == "subtitle_cancel":
+                    await self.subtitle_jobs.cancel()
                 else:
                     await getattr(self.controller, name)(*args)
             except Exception as error:
@@ -143,7 +158,10 @@ class Worker(QObject):
                 if self.discovery:
                     self.discovery.close()
                     self.discovery = None
-            future = asyncio.run_coroutine_threadsafe(self.controller.close(), self.loop)
+            async def shutdown():
+                await self.subtitle_jobs.close()
+                await self.controller.close()
+            future = asyncio.run_coroutine_threadsafe(shutdown(), self.loop)
             try:
                 future.result(15)
             except Exception:
@@ -284,6 +302,8 @@ class Window(QMainWindow):
         self.library = Library(data / "library.sqlite3")
         self._availability = {}
         self._shutdown_complete = False
+        self.subtitle_dialog = None
+        self.subtitle_busy = False
         self.worker = Worker(data / "cache")
         self.worker.event.connect(self.on_event)
         self.devices: dict[str, dict] = {}
@@ -390,12 +410,31 @@ class Window(QMainWindow):
         choose_sub = QPushButton("Choose subtitle…")
         choose_sub.clicked.connect(self.choose_subtitle)
         subs.addWidget(choose_sub)
+        self.create_subtitles = QPushButton("Create subtitles…")
+        self.create_subtitles.clicked.connect(self.open_subtitle_dialog)
+        subs.addWidget(self.create_subtitles)
         self.fit = QPushButton("Fit / Fill")
         self.fit.setCheckable(True)
         self.fit.setEnabled(False)
         self.fit.clicked.connect(lambda checked: self.worker.submit("command", "fit", "fill" if checked else "fit"))
         subs.addWidget(self.fit)
         layout.addLayout(subs)
+
+        self.subtitle_activity = QWidget()
+        subtitle_row = QHBoxLayout(self.subtitle_activity)
+        subtitle_row.setContentsMargins(0, 0, 0, 0)
+        self.subtitle_status = label("", "muted")
+        self.subtitle_status.setWordWrap(True)
+        subtitle_row.addWidget(self.subtitle_status, 1)
+        self.subtitle_progress = QProgressBar()
+        self.subtitle_progress.setMaximumWidth(140)
+        self.subtitle_progress.setTextVisible(False)
+        subtitle_row.addWidget(self.subtitle_progress)
+        self.cancel_subtitles = QPushButton("Cancel")
+        self.cancel_subtitles.clicked.connect(lambda: self.worker.submit("subtitle_cancel"))
+        subtitle_row.addWidget(self.cancel_subtitles)
+        self.subtitle_activity.hide()
+        layout.addWidget(self.subtitle_activity)
 
         controls = QWidget()
         controls.setObjectName("card")
@@ -529,6 +568,28 @@ class Window(QMainWindow):
             self.selection_changed()
             self.worker.submit("subtitle", media.id, subtitle.id)
 
+    def open_subtitle_dialog(self):
+        if not self.selected_id() or self.subtitle_busy:
+            return
+        media = self.library.get(self.selected_id())
+        self.subtitle_dialog = SubtitleDialog(self, media)
+        self.subtitle_dialog.open()
+        self.worker.submit("subtitle_inspect", media.id, media.path)
+
+    def attach_created_subtitle(self, data):
+        media = next((m for m in self.library.items if m.id == data["media_id"] and m.path == data["source"]), None)
+        if media is None:
+            return  # The source may have been removed while a background job ran.
+        subtitle_id = uuid.uuid5(uuid.NAMESPACE_URL, data["path"]).hex
+        if not any(s.id == subtitle_id for s in media.subtitles):
+            media.subtitles.append(Subtitle(subtitle_id, data["path"], data["label"]))
+        media.selected_subtitle = subtitle_id
+        self.library.save()
+        self.sync_library()
+        self.selection_changed()
+        self.worker.submit("subtitle", media.id, subtitle_id)
+        self.status.setText("Saved subtitles attached" + (" · reused existing result" if data.get("reused") else ""))
+
     def connect_device(self):
         device_id = self.tv.currentData()
         if device_id not in self.devices:
@@ -595,6 +656,38 @@ class Window(QMainWindow):
             self.finish_quit()
             return
         if self.quitting:
+            return
+        if event.startswith("subtitles."):
+            if event in {"subtitles.inspected", "subtitles.inspection_failed"}:
+                dialog = self.subtitle_dialog
+                if dialog and dialog.isVisible() and (dialog.media_id, dialog.source) == (data["media_id"], data["source"]):
+                    if event == "subtitles.inspected":
+                        dialog.inspected(data)
+                    else:
+                        dialog.inspection_failed(data["message"])
+            elif event == "subtitles.started":
+                self.subtitle_busy = True
+                self.create_subtitles.setEnabled(False)
+                self.subtitle_activity.show()
+                self.subtitle_status.setText("Preparing subtitles…")
+                self.subtitle_progress.setRange(0, 0)
+            elif event == "subtitles.progress":
+                self.subtitle_status.setText(data["message"])
+                percent = data.get("percent")
+                self.subtitle_progress.setRange(0, 0 if percent is None else 100)
+                if percent is not None:
+                    self.subtitle_progress.setValue(int(percent))
+            elif event == "subtitles.ready":
+                self.attach_created_subtitle(data)
+            elif event == "subtitles.cancelled":
+                self.status.setText("Subtitle job cancelled")
+            elif event == "subtitles.failed":
+                self.show_error(data["message"])
+            elif event == "subtitles.finished":
+                self.subtitle_busy = False
+                self.create_subtitles.setEnabled(True)
+                self.subtitle_activity.hide()
+            self.sleep_hold()
             return
         if event == "library.imported":
             try:
@@ -680,7 +773,7 @@ class Window(QMainWindow):
 
     def sleep_hold(self):
         if os.name == "nt":
-            ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | (0x00000001 if self.playing or self.busy else 0))
+            ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | (0x00000001 if self.playing or self.busy or self.subtitle_busy else 0))
 
     def show_error(self, message):
         self.status.setText(message)
