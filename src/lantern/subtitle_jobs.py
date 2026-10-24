@@ -16,6 +16,7 @@ from typing import Callable
 
 from .media import CREATE_NO_WINDOW, tool_path
 from .speech_models import MODELS, MODEL_REVISIONS
+from .cloud_subtitles import transcribe as cloud_transcribe
 
 MAX_SUBTITLE_BYTES = 8 * 1024**2
 TEXT_CODECS = {"subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text"}
@@ -50,6 +51,8 @@ async def run_tool(*args: str, timeout: float = 120) -> bytes:
         if process.returncode:
             raise ValueError(error.decode(errors="replace")[-1200:] or "The media tool could not complete this job.")
         return output
+    except TimeoutError:
+        raise ValueError("Media inspection or extraction timed out. Check that the file is available and try again.") from None
     finally:
         if process.returncode is None:
             process.kill()
@@ -120,6 +123,9 @@ class SubtitleJobs:
 
     def start_local(self, media_id: str, source: str, options: dict):
         self.start(media_id, source, self.generate_local, options)
+
+    def start_cloud(self, media_id: str, source: str, options: dict):
+        self.start(media_id, source, self.generate_cloud, options)
 
     def start(self, media_id: str, source: str, operation, *args):
         if self.closed:
@@ -248,19 +254,30 @@ class SubtitleJobs:
             self.worker_process = None
 
     async def generate_local(self, source: Path, options: dict) -> dict:
-        model = options.get("model", "small")
+        return await self.generate(source, options, cloud=False)
+
+    async def generate_cloud(self, source: Path, options: dict) -> dict:
+        return await self.generate(source, options, cloud=True)
+
+    async def generate(self, source: Path, options: dict, *, cloud: bool) -> dict:
+        model = "Deepgram Nova-3" if cloud else options.get("model", "small")
         language = options.get("language")
-        threads = options.get("threads", 2)
-        if model not in MODELS or language not in (None, "en", "hi") or threads not in (2, 4):
+        threads = 2 if cloud else options.get("threads", 2)
+        if (not cloud and model not in MODELS) or language not in (None, "en", "hi") or threads not in (2, 4):
             raise ValueError("Choose a supported speech model, language, and CPU mode.")
         stamp = await asyncio.to_thread(source_stamp, source)
         inspection = await inspect_media(source)
+        if cloud and inspection.duration <= 0:
+            raise ValueError("The audio duration is unknown, so a cloud cost estimate cannot be provided. Use local generation for this file.")
+        if cloud and "approved_duration" in options and abs(inspection.duration - options["approved_duration"]) > 1:
+            raise ValueError("The media duration changed. Reopen Create subtitles to review a fresh cloud cost estimate.")
         audio_index = options.get("audio_index")
         if not any(track.index == audio_index for track in inspection.audio):
             raise ValueError("The selected audio track is no longer available.")
         folder = self.root / "generated"
         await asyncio.to_thread(folder.mkdir, parents=True, exist_ok=True)
-        key = cache_key(stamp, "local-v1-faster-whisper-1.2.1", model, MODEL_REVISIONS[model], language, audio_index)
+        key = (cache_key(stamp, "deepgram-nova3-v1", language, audio_index) if cloud else
+               cache_key(stamp, "local-v1-faster-whisper-1.2.1", model, MODEL_REVISIONS[model], language, audio_index))
         destination = folder / f"{key}.srt"
         metadata = folder / f"{key}.json"
         if await asyncio.to_thread(destination.is_file) and await asyncio.to_thread(metadata.is_file):
@@ -273,17 +290,23 @@ class SubtitleJobs:
             audio = job / "audio.flac"
             self.emit("subtitles.progress", {"message": "Preparing the selected audio track…", "percent": 0})
             await self.extract_audio(source, audio, audio_index, inspection.duration, threads)
-            result = await self.local_worker(job, {
-                "model": model, "threads": threads, "language": language,
-                "audio": str(audio), "duration": inspection.duration,
-                "models": str(self.root / "models"), "output": str(job / "result.srt"),
-                "allow_download": bool(options.get("allow_download", False)), "parent_pid": os.getpid(),
-            })
+            if cloud:
+                if stamp != await asyncio.to_thread(source_stamp, source):
+                    raise ValueError("The media changed during audio preparation. Review the file before uploading it.")
+                result = await cloud_transcribe(audio, job / "result.srt", language, options.get("api_key", ""),
+                    lambda message, percent: self.emit("subtitles.progress", {"message": message, "percent": percent}))
+            else:
+                result = await self.local_worker(job, {
+                    "model": model, "threads": threads, "language": language,
+                    "audio": str(audio), "duration": inspection.duration,
+                    "models": str(self.root / "models"), "output": str(job / "result.srt"),
+                    "allow_download": bool(options.get("allow_download", False)), "parent_pid": os.getpid(),
+                })
             output = job / "result.srt"
             await asyncio.to_thread(validate_subtitle, output)
             if stamp != await asyncio.to_thread(source_stamp, source):
                 raise ValueError("The media file changed during transcription. Try again.")
-            label = f"{LANGUAGES.get(result['language'], result['language'])} · AI generated ({model})"
+            label = f"{result.get('language_label', LANGUAGES.get(result['language'], result['language']))} · AI generated ({model})"
             record = {"label": label, "model": model, "language": result["language"], "audio_index": audio_index, "cues": result["cues"]}
             await asyncio.to_thread((job / "metadata.json").write_text, json.dumps(record), encoding="utf-8")
             await asyncio.to_thread(output.replace, destination)

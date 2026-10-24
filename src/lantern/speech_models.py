@@ -77,14 +77,15 @@ def ensure_model(model: str, root: Path, allow_download: bool, progress) -> Path
         root.mkdir(parents=True, exist_ok=True)
         folder = root / f"{model}-{revision}"
         folder.mkdir(exist_ok=True)
-        remaining = sum(entry["size"] for entry in entries if not (folder / entry["rfilename"]).is_file())
+        trusted = {entry["rfilename"] for entry in entries if verified(folder / entry["rfilename"], entry)}
+        remaining = sum(entry["size"] for entry in entries if entry["rfilename"] not in trusted)
         if shutil.disk_usage(root).free < remaining + 1024**3:
             raise ValueError("Not enough free space to save this model and leave 1 GiB available.")
         completed = 0
         for entry in entries:
             name, size = entry["rfilename"], int(entry["size"])
             destination = folder / name
-            if verified(destination, entry):
+            if name in trusted:
                 completed += size
                 continue
             partial = folder / f"{name}.download"
@@ -113,6 +114,8 @@ def ensure_model(model: str, root: Path, allow_download: bool, progress) -> Path
                                     offset += len(block)
                                     if offset > size:
                                         raise ValueError("Model download exceeded its expected size.")
+                                    if shutil.disk_usage(root).free < len(block) + 1024**3:
+                                        raise ValueError("Model download stopped to leave at least 1 GiB of free space.")
                                     output.write(block)
                                     now = time.monotonic()
                                     if now - last_report >= .25:

@@ -49,3 +49,17 @@ adb -s TV_IP:5555 shell am start -W -f 0x14000000 -n app.lantern.tv/.MainActivit
 If a Windows sender is paired, its connection should remain alive through these
 warm launches. Normal five-minute expiry and an actual app-process restart still
 issue a fresh code. Never include pairing codes in saved test reports.
+
+Subtitle generation checks cover real FFmpeg text extraction, preservation of the
+original media, Hindi/English caption timing, worker-process cancellation,
+source-specific cache invalidation, resumable model downloads and corrupt-model
+rejection. Cloud tests use a local HTTP server to verify audio-only uploads,
+word timestamps, key redaction, redirect refusal and cancellation cleanup. Windows
+DPAPI tests use only a dummy credential. These tests do not make paid API calls.
+
+For an end-to-end local check, generate subtitles from a short known speech file
+in Small/Eco mode, then repeat with model downloads disabled. Check the packaged
+Windows executable as well as source execution: its hidden worker must finish,
+release its process and attach a saved subtitle. Review recognition accuracy
+separately on representative English and Hindi dialogue, including music and
+overlapping voices. Synthetic speech checks are not movie-accuracy benchmarks.

@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication
 
 from lantern.app import Window, Worker
 from lantern.library import Library, scan_files
+from lantern.subtitle_dialog import SubtitleDialog
 
 
 @pytest.fixture(scope="module")
@@ -107,6 +108,30 @@ async def test_created_subtitle_attaches_once_and_ignores_removed_sources(qt_app
         window.refresh_library()
         window.on_event("subtitles.ready", data)
         assert not window.library.items
+    finally:
+        window.quit()
+        await qt_wait(qt_app, lambda: window._shutdown_complete)
+
+
+async def test_subtitle_dialog_defaults_to_local_eco_and_cloud_requires_key(qt_app, tmp_path):
+    source = tmp_path / "movie.mp4"
+    source.touch()
+    window = Window(tmp_path / "data", discover=False)
+    try:
+        media = window.library.add([str(source)])[0]
+        dialog = SubtitleDialog(window, media)
+        dialog.inspected({"inspection": {"duration": 7200, "subtitles": [], "audio": [{"index": 1, "label": "English"}]}})
+        assert dialog.mode.currentData() == "local"
+        assert dialog.cpu.currentData() == 2
+        assert dialog.model.currentData() == "small"
+        assert dialog.create.isEnabled()
+        dialog.mode.setCurrentIndex(dialog.mode.findData("cloud"))
+        assert not dialog.create.isEnabled()
+        dialog.api_key.setText("test-only-key")
+        assert dialog.create.isEnabled()
+        assert "US$0.62" in dialog.explanation.text()
+        dialog.reject()
+        assert not dialog.api_key.text()
     finally:
         window.quit()
         await qt_wait(qt_app, lambda: window._shutdown_complete)

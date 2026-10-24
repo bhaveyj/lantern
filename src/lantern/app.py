@@ -19,6 +19,7 @@ from .controller import Controller, Device, Discovery, validate_host
 from .library import Library, Subtitle, scan_files
 from .subtitle_dialog import SubtitleDialog
 from .subtitle_jobs import SubtitleJobs, inspect_media
+from .credentials import CredentialStore
 from .theme import COLORS, apply_theme
 
 
@@ -129,6 +130,8 @@ class Worker(QObject):
                     self.subtitle_jobs.start_extraction(*args)
                 elif name == "subtitle_local":
                     self.subtitle_jobs.start_local(*args)
+                elif name == "subtitle_cloud":
+                    self.subtitle_jobs.start_cloud(*args)
                 elif name == "subtitle_cancel":
                     await self.subtitle_jobs.cancel()
                 else:
@@ -302,6 +305,7 @@ class Window(QMainWindow):
         self.resize(1120, 800)
         self.setMinimumSize(960, 720)
         self.library = Library(data / "library.sqlite3")
+        self.cloud_credentials = CredentialStore(data / "deepgram.key")
         self._availability = {}
         self._shutdown_complete = False
         self.subtitle_dialog = None
@@ -575,6 +579,12 @@ class Window(QMainWindow):
             return
         media = self.library.get(self.selected_id())
         self.subtitle_dialog = SubtitleDialog(self, media)
+        dialog = self.subtitle_dialog
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        def cleared(_):
+            if self.subtitle_dialog is dialog:
+                self.subtitle_dialog = None
+        dialog.finished.connect(cleared)
         self.subtitle_dialog.open()
         self.worker.submit("subtitle_inspect", media.id, media.path)
 

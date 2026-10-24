@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QVBoxLayout
+import os
+
+from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QVBoxLayout
+
+from .cloud_subtitles import estimated_cost
 
 
 class SubtitleDialog(QDialog):
@@ -13,6 +17,8 @@ class SubtitleDialog(QDialog):
         self.ready = False
         self.has_audio = False
         self.has_embedded = False
+        self.duration = 0.0
+        self.key_loaded = False
         layout = QVBoxLayout(self)
         self.message = QLabel("Checking this file for embedded subtitles…")
         self.message.setWordWrap(True)
@@ -21,6 +27,7 @@ class SubtitleDialog(QDialog):
         self.mode = QComboBox()
         self.mode.addItem("Use embedded subtitles", "embedded")
         self.mode.addItem("Generate locally · free", "local")
+        self.mode.addItem("Generate with Deepgram · paid cloud", "cloud")
         self.mode.setCurrentIndex(1)
         self.form.addRow("Method", self.mode)
         self.embedded = QComboBox()
@@ -44,6 +51,14 @@ class SubtitleDialog(QDialog):
         self.download = QCheckBox("Allow the free model download on first use")
         self.download.setChecked(True)
         self.form.addRow(self.download)
+        self.api_key = QLineEdit()
+        self.api_key.setMaxLength(1024)
+        self.api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.api_key.setPlaceholderText("Your Deepgram API key")
+        self.form.addRow("Cloud API key", self.api_key)
+        self.remember_key = QCheckBox("Remember this key with Windows user encryption")
+        self.remember_key.setEnabled(os.name == "nt")
+        self.form.addRow(self.remember_key)
         self.explanation = QLabel("Audio stays on this PC. Models download once (hundreds of MB to about 1.5 GB). Captions use the spoken language; translation is separate. Eco reduces CPU use by taking longer.")
         self.explanation.setWordWrap(True)
         layout.addLayout(self.form)
@@ -55,6 +70,9 @@ class SubtitleDialog(QDialog):
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)
         self.mode.currentIndexChanged.connect(self.mode_changed)
+        self.language.currentIndexChanged.connect(self.mode_changed)
+        self.api_key.textChanged.connect(self.update_enabled)
+        self.finished.connect(lambda _: self.api_key.clear())
         self.mode_changed()
 
     def inspected(self, data):
@@ -75,6 +93,7 @@ class SubtitleDialog(QDialog):
         for track in data["inspection"]["audio"]:
             self.audio.addItem(f"Track {track['index']} · {track['label']}", track["index"])
         self.ready, self.has_audio, self.has_embedded = True, bool(self.audio.count()), bool(usable)
+        self.duration = data["inspection"]["duration"]
         self.mode.model().item(0).setEnabled(bool(usable))
         self.mode.setCurrentIndex(0 if usable else 1)
         self.message.setText("This file already has text subtitles. Extract a track, or generate new captions from its audio." if usable else "No embedded text subtitles were found. Generate captions from the audio instead.")
@@ -82,12 +101,39 @@ class SubtitleDialog(QDialog):
 
     def mode_changed(self):
         embedded = self.mode.currentData() == "embedded"
+        cloud = self.mode.currentData() == "cloud"
         self.form.setRowVisible(self.embedded, embedded)
-        for widget in (self.audio, self.language, self.model, self.cpu, self.download):
+        for widget in (self.audio, self.language):
             self.form.setRowVisible(widget, not embedded)
+        for widget in (self.model, self.cpu, self.download):
+            self.form.setRowVisible(widget, not embedded and not cloud)
+        for widget in (self.api_key, self.remember_key):
+            self.form.setRowVisible(widget, cloud)
         self.explanation.setVisible(not embedded)
-        self.create.setText("Extract subtitles" if embedded else "Generate subtitles")
-        self.create.setEnabled(self.ready and (self.has_embedded if embedded else self.has_audio))
+        if cloud:
+            if not self.key_loaded:
+                self.key_loaded = True
+                try:
+                    saved = self.window.cloud_credentials.load()
+                    self.api_key.setText(saved)
+                    self.remember_key.setChecked(bool(saved))
+                except ValueError as error:
+                    self.message.setText(str(error))
+            cost = estimated_cost(self.duration, self.language.currentData())
+            amount = "less than US$0.01" if 0 < cost < .01 else f"US${cost:.2f}"
+            estimate = f"Estimated transcription cost: {amount}." if self.duration > 0 else "Duration unavailable; use local generation for this file."
+            self.explanation.setText(f"Only the selected audio will be uploaded to Deepgram. {estimate} Estimate uses published rates checked 25 Oct 2026; provider charges, taxes, and limits may differ. Cancellation cannot undo provider charges already incurred. Captions use the spoken language.")
+        else:
+            self.explanation.setText("Audio stays on this PC. Models download once (hundreds of MB to about 1.5 GB). Captions use the spoken language; translation is separate. Eco reduces CPU use by taking longer.")
+        self.create.setText("Extract subtitles" if embedded else "Upload audio & generate" if cloud else "Generate subtitles")
+        self.update_enabled()
+
+    def update_enabled(self):
+        mode = self.mode.currentData()
+        available = self.has_embedded if mode == "embedded" else self.has_audio
+        if mode == "cloud":
+            available = available and bool(self.api_key.text().strip()) and self.duration > 0
+        self.create.setEnabled(self.ready and available)
 
     def inspection_failed(self, message):
         self.message.setText(message)
@@ -96,7 +142,19 @@ class SubtitleDialog(QDialog):
         self.create.setEnabled(False)
         if self.mode.currentData() == "embedded":
             self.window.worker.submit("subtitle_extract", self.media_id, self.source, self.embedded.currentData())
-        else:
+        elif self.mode.currentData() == "local":
             options = {"audio_index": self.audio.currentData(), "language": self.language.currentData(), "model": self.model.currentData(), "threads": self.cpu.currentData(), "allow_download": self.download.isChecked()}
             self.window.worker.submit("subtitle_local", self.media_id, self.source, options)
+        else:
+            api_key = self.api_key.text().strip()
+            try:
+                if self.remember_key.isChecked():
+                    self.window.cloud_credentials.save(api_key)
+                else:
+                    self.window.cloud_credentials.forget()
+            except (ValueError, OSError) as error:
+                self.message.setText(str(error))
+                self.update_enabled()
+                return
+            self.window.worker.submit("subtitle_cloud", self.media_id, self.source, {"audio_index": self.audio.currentData(), "language": self.language.currentData(), "api_key": api_key, "approved_duration": self.duration})
         self.accept()
