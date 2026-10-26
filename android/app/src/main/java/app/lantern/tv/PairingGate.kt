@@ -8,7 +8,7 @@ class PairingGate(private val now: () -> Long = { System.currentTimeMillis() }) 
     var pin: String = newPin()
         private set
     private var created = now()
-    private val failures = mutableMapOf<String, MutableList<Long>>()
+    private val failures = linkedMapOf<String, MutableList<Long>>()
 
     private fun newPin() = (100000 + random.nextInt(900000)).toString()
 
@@ -21,6 +21,8 @@ class PairingGate(private val now: () -> Long = { System.currentTimeMillis() }) 
 
     @Synchronized fun accept(peer: String, candidate: String): Boolean {
         refresh()
+        failures.entries.removeAll { entry -> entry.value.removeAll { now() - it > 60000 }; entry.value.isEmpty() }
+        if (peer !in failures && failures.size >= 256) return false
         val attempts = failures.getOrPut(peer) { mutableListOf() }
         attempts.removeAll { now() - it > 60000 }
         if (attempts.size >= 5) return false

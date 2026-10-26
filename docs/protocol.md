@@ -16,6 +16,13 @@ item's position and paused state.
 
 Windows sends a WebSocket PING at a fixed 10-second interval, independent of incoming state updates. The TV answers with PONG. This keeps the receiver's 30-second inbound socket timeout from expiring while the user watches or pauses without issuing commands. The sender cancels this task on disconnect; aiohttp's automatic heartbeat additionally detects an unresponsive peer when inbound traffic stops.
 
+The receiver caps concurrent clients at eight. Unpaired WebSockets close after
+15 seconds even if they send only keepalive frames. The patched NanoWSD parser
+rejects frames over 1 MiB before allocating their payloads, bounds aggregate
+fragmented messages to 1 MiB/256 fragments, and bounds JSON depth to 32. Pairing
+messages are limited to 8 KiB; paired clients may send at most 30 messages per
+second. Failed-PIN tracking is time-limited and bounded to 256 peers.
+
 | Direction | Type | Fields and behavior |
 | --- | --- | --- |
 | Windows → TV | `playlist.snapshot` | `items`: ordered list of `id`, `title`, `url`, `selectedSubtitle`, and `subtitles` (`id`, `label`, `url`). Windows owns the playlist. |
