@@ -16,6 +16,11 @@ android/**/build/
 *.iml
 *.keystore
 *.jks
+*.pfx
+*.p12
+*.key
+.env
+.env.*
 *.log
 *.part
 *.download

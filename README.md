@@ -89,7 +89,7 @@ adb connect TV_IP:5555
 
 If the TV uses a different ADB transport, omit `-Device` when it is the only authorized device, or pass the exact serial shown by `adb devices`. Approve the debugging prompt on the TV before installing.
 
-The Android module uses application ID `app.lantern.tv`, min SDK 24, target/compile SDK 35, Kotlin, AndroidX Media3, and NanoHTTPD/NanoWSD. The debug APK is signed with the local development key; a release build needs a deliberately managed signing key and release configuration.
+The Android module uses application ID `app.lantern.tv`, min SDK 24, target/compile SDK 35, Kotlin, AndroidX Media3, and NanoHTTPD/NanoWSD. The debug APK is signed with the local development key. For a release APK, set `LANTERN_ANDROID_KEYSTORE` to an absolute keystore path outside the repository, plus `LANTERN_ANDROID_STORE_PASSWORD`, `LANTERN_ANDROID_KEY_ALIAS`, and `LANTERN_ANDROID_KEY_PASSWORD`, then run `./scripts/build-android.ps1 -Release`. Both Gradle and the script refuse unsigned release builds. Keep the same release key for future updates and back it up securely. A release key cannot update a debug-signed installation; changing signing identity requires a deliberate migration and may erase app data.
 
 ## Build the Windows sender
 
@@ -106,6 +106,8 @@ This creates:
 - `dist/Lantern-Setup-0.1.0.exe` — installer, only when `.tools/inno/ISCC.exe` is available.
 
 To produce the installer, install Inno Setup 6 and make its compiler available at `.tools/inno/ISCC.exe`, or adapt `scripts/build-windows.ps1` to your local installation. The script copies the README, license, and third-party notices into the portable distribution.
+
+Normal Windows builds are unsigned development artifacts. For a signed build, install your valid code-signing certificate and private key in `CurrentUser\My`, set `LANTERN_WINDOWS_CERT_THUMBPRINT`, and run `./scripts/build-windows.ps1 -Release`. The script validates the certificate before packaging, signs the application before building the installer, then signs the installer and verifies both signatures and timestamps. Missing signing credentials or failed signing stops the release build. This does not purchase a certificate, publish binaries, or deploy the app.
 
 If Windows Firewall does not allow the packaged sender, run this command from an elevated PowerShell prompt:
 
