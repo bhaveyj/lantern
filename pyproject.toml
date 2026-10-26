@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8,<9", "pytest-asyncio>=0.25,<1", "pytest-aiohttp>=1,<2", "pyinstaller>=6,<7"]
+dev = ["pytest>=9.0.3,<10", "pytest-asyncio>=1.4.1,<2", "pytest-aiohttp>=1,<2", "pyinstaller>=6,<7"]
 
 [project.scripts]
 lantern = "lantern.app:main"
