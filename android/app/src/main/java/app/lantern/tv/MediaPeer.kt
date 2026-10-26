@@ -15,6 +15,7 @@ data class MediaPeer(val host: String, val port: Int, val fingerprint: String) {
     fun checkUrl(value: String): URI {
         val uri = URI(value)
         require(uri.scheme == "https" && uri.host == host && uri.port == port && uri.rawUserInfo == null && uri.rawFragment == null) { "Media URL does not belong to the paired sender" }
+        require(uri.rawQuery == null && Regex("/(stream|subtitle)/[A-Za-z0-9_-]{43}/[A-Za-z0-9_-]{1,256}").matches(uri.rawPath)) { "Invalid media route" }
         return uri
     }
 

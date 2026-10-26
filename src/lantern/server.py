@@ -30,6 +30,8 @@ class MediaServer:
         self.bind_host = "127.0.0.1"
         self.scheme = "http"
         self.site = None
+        self.allowed_peer = "127.0.0.1"
+        self.cast_compatibility = False
         self.transports = weakref.WeakSet()
         self._subtitle_cache = OrderedDict()
         self._subtitle_cache_bytes = 0
@@ -42,11 +44,22 @@ class MediaServer:
 
     @web.middleware
     async def cors(self, request: web.Request, handler):
+        local = request.transport.get_extra_info("sockname") if request.transport else None
+        origin = request.headers.get("Origin")
+        # Check the socket and literal Host, not proxy headers or DNS names.
+        # This also prevents browser DNS rebinding into the local media server.
+        if request.remote != self.allowed_peer or not local or request.headers.get("Host") != f"{local[0]}:{local[1]}":
+            raise web.HTTPForbidden()
+        cast_origins = {"https://www.gstatic.com", "https://cast.google.com", "null"}
+        if origin and (not self.cast_compatibility or origin not in cast_origins):
+            raise web.HTTPForbidden()
         try:
             response = await handler(request)
         except web.HTTPException as error:
             response = error
-        response.headers.update({"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "Range, Content-Type", "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS", "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"})
+        response.headers.update({"Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"})
+        if origin:
+            response.headers.update({"Access-Control-Allow-Origin": origin, "Vary": "Origin", "Access-Control-Allow-Headers": "Range, Content-Type", "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS", "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges"})
         if isinstance(response, web.HTTPException):
             raise response
         return response
@@ -116,10 +129,12 @@ class MediaServer:
         await self.runner.setup()
         await self.configure("127.0.0.1")
 
-    async def configure(self, host: str, context=None):
+    async def configure(self, host: str, context=None, *, peer: str = "127.0.0.1", cast: bool = False):
         if self.site:
             await self.site.stop()
         self.bind_host = host
+        self.allowed_peer = peer
+        self.cast_compatibility = cast
         self.scheme = "https" if context else "http"
         self.site = web.TCPSite(self.runner, host, 0, ssl_context=context)
         await self.site.start()

@@ -10,6 +10,27 @@ from lantern.server import MediaServer
 from lantern.media import subtitle_vtt
 
 
+async def test_media_rejects_other_peers_rebinding_and_browser_origins(aiohttp_client, tmp_path):
+    path = tmp_path / "movie.mp4"
+    path.write_bytes(b"media")
+    server = MediaServer()
+    server.files["movie"] = path
+    client = await aiohttp_client(server.app)
+    route = f"/stream/{server.token}/movie"
+    assert (await client.get(route, headers={"Host": "attacker.example"})).status == 403
+    assert (await client.get(route, headers={"Origin": "https://attacker.example"})).status == 403
+    assert (await client.get(route, headers={"Origin": "null"})).status == 403
+    server.allowed_peer = "192.168.1.10"
+    assert (await client.get(route)).status == 403  # A stolen token is insufficient.
+    server.allowed_peer = "127.0.0.1"
+    server.cast_compatibility = True
+    response = await client.get(route, headers={"Origin": "https://www.gstatic.com"})
+    assert response.status == 200 and await response.read() == b"media"
+    assert response.headers["Access-Control-Allow-Origin"] == "https://www.gstatic.com"
+    assert (await client.options(route, headers={"Origin": "https://www.gstatic.com", "Access-Control-Request-Headers": "range"})).status == 204
+    assert (await client.get(route, headers={"Origin": "https://attacker.example"})).status == 403
+
+
 async def test_stream_requires_token_supports_range_and_rotates(aiohttp_client, tmp_path):
     path = tmp_path / "movie.mp4"
     path.write_bytes(bytes(range(100)))
@@ -23,7 +44,7 @@ async def test_stream_requires_token_supports_range_and_rotates(aiohttp_client, 
     assert response.status == 206
     assert response.headers["Content-Range"] == "bytes 10-19/100"
     assert await response.read() == bytes(range(10, 20))
-    assert response.headers["Access-Control-Allow-Origin"] == "*"
+    assert "Access-Control-Allow-Origin" not in response.headers
     response = await client.head(route)
     assert response.status == 200
     assert response.headers["Content-Length"] == "100"

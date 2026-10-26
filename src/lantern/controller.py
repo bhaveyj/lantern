@@ -47,7 +47,7 @@ def validate_host(value: str) -> str:
         address = ipaddress.ip_address(value.strip())
     except ValueError:
         raise ValueError("Enter the TV's IPv4 address, such as 192.168.1.25.") from None
-    if address.version != 4 or not address.is_private or address.is_unspecified or address.is_multicast:
+    if address.version != 4 or not (address.is_loopback or any(address in network for network in (ipaddress.ip_network("10.0.0.0/8"), ipaddress.ip_network("172.16.0.0/12"), ipaddress.ip_network("192.168.0.0/16")))):
         raise ValueError("Use an IPv4 address on your home network.")
     return str(address)
 
@@ -64,8 +64,15 @@ class Discovery(ServiceListener):
     def update_service(self, zc, service_type, name):
         info = zc.get_service_info(service_type, name, timeout=2000)
         if info and info.parsed_addresses():
-            addresses = [a for a in info.parsed_addresses() if ":" not in a]
+            addresses = []
+            for address in info.parsed_addresses():
+                try:
+                    addresses.append(validate_host(address))
+                except ValueError:
+                    continue
             if not addresses:
+                return
+            if not 1 <= info.port <= 65535:
                 return
             props = {k.decode(errors="replace"): v.decode(errors="replace") for k, v in info.properties.items() if v}
             device = Device(name, props.get("fn", name.split("._")[0]), addresses[0], info.port, "cast" if "_googlecast" in service_type else "receiver", props.get("id", ""), props.get("md", ""))
@@ -218,6 +225,9 @@ class Controller:
         await self._disconnect()
         self._session_generation += 1
         self.device = Device(**device)
+        self.device.host = validate_host(self.device.host)
+        if self.device.kind not in {"receiver", "cast"} or not 1 <= self.device.port <= 65535:
+            raise ValueError("Invalid receiver type or port.")
         self.emit("status", {"message": f"Connecting to {self.device.name}…", "busy": True})
         try:
             if self.device.kind == "receiver":
@@ -235,7 +245,7 @@ class Controller:
                     return
                 if self.identity is None:
                     self.identity = await asyncio.to_thread(LocalIdentity, self.receiver_trust.path.parent)
-                await self.server.configure(local_address(self.device.host), self.identity.context)
+                await self.server.configure(local_address(self.device.host), self.identity.context, peer=self.device.host)
                 self.ws = await self.session.ws_connect(f"https://{self.device.host}:{self.device.port}/control", ssl=aiohttp.Fingerprint(bytes.fromhex(observed)), heartbeat=20, max_msg_size=1024 * 1024)
                 await self.send({"type": "pair", "version": 2, "pin": pin, "name": socket.gethostname(), "mediaPort": self.server.port, "mediaFingerprint": self.identity.fingerprint})
                 response = await asyncio.wait_for(self.ws.receive_json(), timeout=8)
@@ -249,7 +259,7 @@ class Controller:
                 self.receiver_keepalive_task = asyncio.create_task(self.keep_receiver_alive(self.ws))
                 await self._sync(self.playlist)
             else:
-                await self.server.configure(local_address(self.device.host))
+                await self.server.configure(local_address(self.device.host), peer=self.device.host, cast=True)
                 device_uuid = uuid.UUID(self.device.uuid) if self.device.uuid else uuid.uuid4()
                 self.cast = await self.cast_call(pychromecast.get_chromecast_from_host, (self.device.host, self.device.port, device_uuid, self.device.model, self.device.name))
                 await self.cast_call(self.cast.wait, 10)

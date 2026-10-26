@@ -22,7 +22,7 @@ class SecureMediaDataSource(private val peer: () -> MediaPeer?) : BaseDataSource
     override fun open(dataSpec: DataSpec): Long {
         transferInitializing(dataSpec)
         val trusted = peer() ?: throw IOException("No authenticated media sender")
-        val target = try { trusted.checkUrl(dataSpec.uri.toString()) } catch (_: IllegalArgumentException) { throw IOException("Untrusted media URL") }
+        val target = try { trusted.checkUrl(dataSpec.uri.toString()) } catch (_: Exception) { throw IOException("Untrusted media URL") }
         val manager = trusted.trustManager()
         val context = SSLContext.getInstance("TLSv1.2").apply { init(null, arrayOf(manager), null) }
         val opened = target.toURL().openConnection() as HttpsURLConnection

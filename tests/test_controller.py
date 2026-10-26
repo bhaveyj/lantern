@@ -13,7 +13,7 @@ from lantern.security import LocalIdentity
 
 def test_only_local_ip_addresses_are_accepted():
     assert validate_host(" 192.168.1.2 ") == "192.168.1.2"
-    for invalid in ["8.8.8.8", "https://192.168.1.2", "0.0.0.0", "224.0.0.1"]:
+    for invalid in ["8.8.8.8", "https://192.168.1.2", "0.0.0.0", "224.0.0.1", "169.254.169.254", "192.0.0.1", "240.0.0.1"]:
         with pytest.raises(ValueError):
             validate_host(invalid)
 

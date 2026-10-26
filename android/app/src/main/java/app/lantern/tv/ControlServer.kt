@@ -114,7 +114,7 @@ class ControlServer(
                     return
                 }
                 if (owner !== this) return
-                ControlMessages.validate(message)
+                ControlMessages.validate(message, requireNotNull(mediaPeer))
                 dispatch(message) { owner === this && isOpen }
             } catch (_: Exception) {
                 if (paired && owner === this && isOpen) {

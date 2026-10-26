@@ -162,7 +162,7 @@ The custom receiver advertises `_lantern._tcp.local.` and listens on TCP port `8
 
 The custom receiver uses TLS 1.2 or newer. Windows pins the TV's SHA-256 certificate fingerprint after the user compares it on the TV, before sending the PIN. The authenticated pairing sends the Windows media server's certificate fingerprint, and the TV accepts HTTPS media only from that pinned sender. There is no automatic plaintext fallback; both apps must support protocol v2. The TV key lives in AndroidKeyStore; Windows encrypts its media key and protects its password with the current user's DPAPI identity. Clearing app data removes these identities.
 
-Google Cast's default receiver requires a separate HTTP compatibility path. Windows warns before connecting, and Cast should be used only on a trusted LAN. Do not publish session URLs or enable router port forwarding. The media listener binds loopback while idle and the selected network interface while connected. The protocol and message formats are documented in [`docs/protocol.md`](docs/protocol.md).
+Google Cast's default receiver requires a separate HTTP compatibility path. Windows warns before connecting, and Cast should be used only on a trusted LAN. Do not publish session URLs or enable router port forwarding. The media listener binds loopback while idle and the selected network interface while connected, accepts requests only from the selected TV's address, and rejects foreign Host and browser Origin headers. Cast CORS is limited to known receiver origins on that peer. The TV accepts only tokenized media/subtitle routes on the paired sender and refuses redirects. The protocol and message formats are documented in [`docs/protocol.md`](docs/protocol.md).
 
 ## Repository layout
 
