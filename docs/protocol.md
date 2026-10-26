@@ -23,7 +23,10 @@ The receiver caps concurrent clients at eight. Unpaired WebSockets close after
 rejects frames over 1 MiB before allocating their payloads, bounds aggregate
 fragmented messages to 1 MiB/256 fragments, and bounds JSON depth to 32. Pairing
 messages are limited to 8 KiB; paired clients may send at most 30 messages per
-second. Failed-PIN tracking is time-limited and bounded to 256 peers.
+second. Failed-PIN tracking is time-limited and bounded to 256 peers. A receiver-wide
+limit of 25 failed PIN attempts per minute also applies, so rotating source IP
+addresses cannot bypass the five-attempt per-peer limit. A lockout clears after
+the one-minute window; it does not change the displayed PIN.
 
 | Direction | Type | Fields and behavior |
 | --- | --- | --- |

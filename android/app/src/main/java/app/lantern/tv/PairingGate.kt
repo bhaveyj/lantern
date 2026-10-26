@@ -2,13 +2,14 @@ package app.lantern.tv
 
 import java.security.SecureRandom
 
-/** The visible PIN expires after five minutes; failed attempts are bounded per peer. */
+/** Short-lived PIN with per-peer and receiver-wide failed-attempt limits. */
 class PairingGate(private val now: () -> Long = { System.currentTimeMillis() }) {
     private val random = SecureRandom()
     var pin: String = newPin()
         private set
     private var created = now()
     private val failures = linkedMapOf<String, MutableList<Long>>()
+    private val globalFailures = mutableListOf<Long>()
 
     private fun newPin() = (100000 + random.nextInt(900000)).toString()
 
@@ -21,6 +22,8 @@ class PairingGate(private val now: () -> Long = { System.currentTimeMillis() }) 
 
     @Synchronized fun accept(peer: String, candidate: String): Boolean {
         refresh()
+        globalFailures.removeAll { now() - it > 60000 }
+        if (globalFailures.size >= 25) return false
         failures.entries.removeAll { entry -> entry.value.removeAll { now() - it > 60000 }; entry.value.isEmpty() }
         if (peer !in failures && failures.size >= 256) return false
         val attempts = failures.getOrPut(peer) { mutableListOf() }
@@ -28,6 +31,7 @@ class PairingGate(private val now: () -> Long = { System.currentTimeMillis() }) 
         if (attempts.size >= 5) return false
         if (candidate != pin) {
             attempts.add(now())
+            globalFailures.add(now())
             return false
         }
         failures.remove(peer)

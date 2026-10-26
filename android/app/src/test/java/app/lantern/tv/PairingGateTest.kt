@@ -21,4 +21,12 @@ class PairingGateTest {
         clock += 60001
         assertTrue(gate.accept("peer", gate.pin))
     }
+    @Test fun changingPeerAddressesCannotBypassReceiverWideLimit() {
+        var clock = 0L
+        val gate = PairingGate { clock }
+        repeat(25) { assertFalse(gate.accept("peer-$it", "000000")) }
+        assertFalse(gate.accept("new-peer", gate.pin))
+        clock += 60001
+        assertTrue(gate.accept("new-peer", gate.pin))
+    }
 }
