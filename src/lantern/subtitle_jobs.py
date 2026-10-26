@@ -16,7 +16,7 @@ from typing import Callable
 
 from .media import CREATE_NO_WINDOW, tool_path
 from .speech_models import MODELS, MODEL_REVISIONS
-from .cloud_subtitles import transcribe as cloud_transcribe
+from .cloud_subtitles import transcribe as cloud_transcribe, estimated_cost
 
 MAX_SUBTITLE_BYTES = 8 * 1024**2
 TEXT_CODECS = {"subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text"}
@@ -294,6 +294,12 @@ class SubtitleJobs:
             raise ValueError("The audio duration is unknown, so a cloud cost estimate cannot be provided. Use local generation for this file.")
         if cloud and "approved_duration" in options and abs(inspection.duration - options["approved_duration"]) > 1:
             raise ValueError("The media duration changed. Reopen Create subtitles to review a fresh cloud cost estimate.")
+        if cloud:
+            budget = float(options.get("max_estimated_cost", 1.0))
+            if not math.isfinite(budget) or budget <= 0 or estimated_cost(inspection.duration, language) > budget:
+                raise ValueError("The estimated cloud cost exceeds the allowed amount. Review the cost limit in Create subtitles.")
+            if not isinstance(options.get("mip_opt_out", True), bool):
+                raise ValueError("Choose a valid cloud privacy setting.")
         audio_index = options.get("audio_index")
         if not any(track.index == audio_index for track in inspection.audio):
             raise ValueError("The selected audio track is no longer available.")
@@ -321,7 +327,7 @@ class SubtitleJobs:
                 if stamp != await asyncio.to_thread(source_stamp, source):
                     raise ValueError("The media changed during audio preparation. Review the file before uploading it.")
                 result = await cloud_transcribe(audio, job / "result.srt", language, options.get("api_key", ""),
-                    lambda message, percent: self.emit("subtitles.progress", {"message": message, "percent": percent}))
+                    lambda message, percent: self.emit("subtitles.progress", {"message": message, "percent": percent}), mip_opt_out=options.get("mip_opt_out", True))
             else:
                 result = await self.local_worker(job, {
                     "model": model, "threads": threads, "language": language,
@@ -335,6 +341,8 @@ class SubtitleJobs:
                 raise ValueError("The media file changed during transcription. Try again.")
             label = f"{result.get('language_label', LANGUAGES.get(result['language'], result['language']))} · AI generated ({model})"
             record = {"label": label, "model": model, "language": result["language"], "audio_index": audio_index, "cues": result["cues"]}
+            if cloud:
+                record["mip_opt_out"] = options.get("mip_opt_out", True)
             await asyncio.to_thread((job / "metadata.json").write_text, json.dumps(record), encoding="utf-8")
             await asyncio.to_thread(output.replace, destination)
             await asyncio.to_thread((job / "metadata.json").replace, metadata)

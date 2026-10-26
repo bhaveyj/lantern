@@ -154,6 +154,8 @@ The same dialog can generate subtitles locally from an audio track using free mu
 
 An optional **Generate with Deepgram** method uploads only the selected audio track using your own API key. The dialog shows an estimated USD cost and requires an explicit **Upload audio & generate** action. Auto uses Nova-3 multilingual with English/Hindi hints; selecting English or Hindi uses that language. The optional remembered key is protected with Windows DPAPI for the current user, never stored in plaintext or sent to the TV. Leaving Remember unchecked forgets any saved key when starting a cloud job. Cached results can be reused without another upload. Cancelling stops the local request but does not undo charges already incurred by the provider. No cloud credentials or paid requests are needed for local generation.
 
+Cloud generation excludes uploads from Deepgram model improvement by default (`mip_opt_out=true`). The dialog explains the privacy choice and starts with a US$1 maximum estimated cost per job; raise it deliberately for longer audio. This checks Lantern's estimate, not a provider-enforced billing cap. Deepgram's published Pay As You Go/Growth rates do not change for opt-out as of 26 Oct 2026. Cached results remain reusable and the choice does not change retention of earlier uploads.
+
 ## Network and security model
 
 The custom receiver advertises `_lantern._tcp.local.` and listens on TCP port `8765`. The sender opens a WebSocket at `/control`, pairs with the six-digit TV PIN, and sends a fixed WebSocket PING every 10 seconds to keep the receiver alive during quiet playback. The sender's media server listens on an available TCP port and exposes only explicitly added files using random session tokens and byte-range support.

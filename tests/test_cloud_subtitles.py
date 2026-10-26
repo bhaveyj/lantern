@@ -20,6 +20,7 @@ async def test_cloud_uploads_only_selected_audio_and_reuses_saved_subtitles(monk
         assert request.headers["Authorization"] == "Token test-only-secret"
         assert request.query["language"] == "multi"
         assert request.query.getall("language_hint") == ["en", "hi"]
+        assert request.query["mip_opt_out"] == "true"
         return web.json_response({"results": {"channels": [{"alternatives": [{"languages": ["hi", "en"], "words": [
             {"word": "नमस्ते", "start": .1, "end": .6},
             {"word": "world", "punctuated_word": "world.", "start": .7, "end": 1.5},
@@ -42,6 +43,34 @@ async def test_cloud_uploads_only_selected_audio_and_reuses_saved_subtitles(monk
     assert source.read_bytes() == original
     assert not list((jobs.root / "jobs").iterdir())
     assert "test-only-secret" not in next((jobs.root / "generated").glob("*.json")).read_text()
+    assert __import__("json").loads(next((jobs.root / "generated").glob("*.json")).read_text())["mip_opt_out"] is True
+
+
+async def test_cloud_cost_limit_blocks_before_extract_or_upload(monkeypatch, tmp_path):
+    source = await make_embedded_fixture(tmp_path)
+    jobs = SubtitleJobs(tmp_path / "subtitles", lambda *_: None)
+    async def unexpected(*args, **kwargs):
+        pytest.fail("Audio was prepared or uploaded despite the budget limit")
+    monkeypatch.setattr(jobs, "extract_audio", unexpected)
+    monkeypatch.setattr("lantern.subtitle_jobs.cloud_transcribe", unexpected)
+    for budget in (0, -1, float("nan"), .00000001):
+        with pytest.raises(ValueError, match="cost"):
+            await jobs.generate_cloud(source, {"audio_index": 0, "language": "en", "api_key": "dummy", "max_estimated_cost": budget})
+
+
+async def test_cloud_training_opt_in_requires_explicit_false(monkeypatch, aiohttp_server, tmp_path):
+    from lantern.cloud_subtitles import transcribe
+    async def handle(request):
+        await request.read()
+        assert request.query["mip_opt_out"] == "false"
+        return web.json_response({"results": {"channels": [{"alternatives": [{"words": [{"word": "hello", "start": 0, "end": 1}]}]}]}})
+    app = web.Application()
+    app.router.add_post("/listen", handle)
+    server = await aiohttp_server(app)
+    monkeypatch.setattr("lantern.cloud_subtitles.ENDPOINT", str(server.make_url("/listen")))
+    audio = tmp_path / "audio.flac"
+    audio.write_bytes(b"fLaC")
+    await transcribe(audio, tmp_path / "out.srt", "en", "dummy", lambda *_: None, mip_opt_out=False)
 
 
 @pytest.mark.parametrize("status", [401, 429, 302])

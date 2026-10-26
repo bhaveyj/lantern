@@ -17,10 +17,12 @@ def estimated_cost(duration: float, language: str | None) -> float:
     return duration / 60 * RATES["single" if language else "multi"]
 
 
-async def transcribe(audio: Path, output: Path, language: str | None, api_key: str, progress) -> dict:
+async def transcribe(audio: Path, output: Path, language: str | None, api_key: str, progress, *, mip_opt_out: bool = True) -> dict:
     if not api_key.strip() or len(api_key) > 1024 or any(not 33 <= ord(char) <= 126 for char in api_key.strip()):
         raise ValueError("Enter a valid Deepgram API key to use cloud transcription.")
-    params = [("model", "nova-3"), ("language", language or "multi"), ("punctuate", "true"), ("smart_format", "true")]
+    if not isinstance(mip_opt_out, bool):
+        raise ValueError("Choose whether to exclude this upload from model improvement.")
+    params = [("model", "nova-3"), ("language", language or "multi"), ("punctuate", "true"), ("smart_format", "true"), ("mip_opt_out", str(mip_opt_out).lower())]
     if not language:
         params.extend([("language_hint", "en"), ("language_hint", "hi")])
     total = audio.stat().st_size

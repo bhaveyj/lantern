@@ -131,6 +131,11 @@ async def test_subtitle_dialog_defaults_to_local_eco_and_cloud_requires_key(qt_a
         dialog.api_key.setText("test-only-key")
         assert dialog.create.isEnabled()
         assert "US$0.62" in dialog.explanation.text()
+        assert dialog.cloud_privacy.isChecked()
+        dialog.cloud_budget.setValue(.5)
+        assert not dialog.create.isEnabled()
+        dialog.cloud_budget.setValue(1)
+        assert dialog.create.isEnabled()
         dialog.reject()
         assert not dialog.api_key.text()
     finally:

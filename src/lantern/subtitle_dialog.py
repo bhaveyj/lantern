@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QLineEdit, QVBoxLayout
+from PySide6.QtWidgets import QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLayout, QLabel, QLineEdit, QVBoxLayout
 
 from .cloud_subtitles import estimated_cost
 
@@ -59,6 +59,14 @@ class SubtitleDialog(QDialog):
         self.remember_key = QCheckBox("Remember this key with Windows user encryption")
         self.remember_key.setEnabled(os.name == "nt")
         self.form.addRow(self.remember_key)
+        self.cloud_privacy = QCheckBox("Exclude this upload from model training and retention after processing")
+        self.cloud_privacy.setChecked(True)
+        self.form.addRow(self.cloud_privacy)
+        self.cloud_budget = QDoubleSpinBox()
+        self.cloud_budget.setRange(.01, 100)
+        self.cloud_budget.setPrefix("US$ ")
+        self.cloud_budget.setValue(1.0)
+        self.form.addRow("Maximum estimated cost", self.cloud_budget)
         self.explanation = QLabel("Audio stays on this PC. Models download once (hundreds of MB to about 1.5 GB). Captions use the spoken language; translation is separate. Eco reduces CPU use by taking longer.")
         self.explanation.setWordWrap(True)
         layout.addLayout(self.form)
@@ -72,6 +80,8 @@ class SubtitleDialog(QDialog):
         self.mode.currentIndexChanged.connect(self.mode_changed)
         self.language.currentIndexChanged.connect(self.mode_changed)
         self.api_key.textChanged.connect(self.update_enabled)
+        self.cloud_privacy.toggled.connect(self.mode_changed)
+        self.cloud_budget.valueChanged.connect(self.update_enabled)
         self.finished.connect(lambda _: self.api_key.clear())
         self.mode_changed()
 
@@ -107,7 +117,7 @@ class SubtitleDialog(QDialog):
             self.form.setRowVisible(widget, not embedded)
         for widget in (self.model, self.cpu, self.download):
             self.form.setRowVisible(widget, not embedded and not cloud)
-        for widget in (self.api_key, self.remember_key):
+        for widget in (self.api_key, self.remember_key, self.cloud_privacy, self.cloud_budget):
             self.form.setRowVisible(widget, cloud)
         self.explanation.setVisible(not embedded)
         if cloud:
@@ -122,7 +132,8 @@ class SubtitleDialog(QDialog):
             cost = estimated_cost(self.duration, self.language.currentData())
             amount = "less than US$0.01" if 0 < cost < .01 else f"US${cost:.2f}"
             estimate = f"Estimated transcription cost: {amount}." if self.duration > 0 else "Duration unavailable; use local generation for this file."
-            self.explanation.setText(f"Only the selected audio will be uploaded to Deepgram. {estimate} Estimate uses published rates checked 25 Oct 2026; provider charges, taxes, and limits may differ. Cancellation cannot undo provider charges already incurred. Captions use the spoken language.")
+            privacy = "Model training is excluded; Deepgram retains audio/transcripts only as needed to process this request." if self.cloud_privacy.isChecked() else "You allow Deepgram to retain the uploaded audio and transcript for model improvement."
+            self.explanation.setText(f"Only the selected audio will be uploaded to Deepgram. {privacy} {estimate} Published Pay As You Go rates checked 26 Oct 2026 apply with or without training opt-out; your contract, taxes, and charges may differ. The limit applies to our estimate, not provider billing. Cancellation cannot undo charges. Cached subtitles are reused; this choice does not change retention of past uploads.")
         else:
             self.explanation.setText("Audio stays on this PC. Models download once (hundreds of MB to about 1.5 GB). Captions use the spoken language; translation is separate. Eco reduces CPU use by taking longer.")
         self.create.setText("Extract subtitles" if embedded else "Upload audio & generate" if cloud else "Generate subtitles")
@@ -132,7 +143,7 @@ class SubtitleDialog(QDialog):
         mode = self.mode.currentData()
         available = self.has_embedded if mode == "embedded" else self.has_audio
         if mode == "cloud":
-            available = available and bool(self.api_key.text().strip()) and self.duration > 0
+            available = available and bool(self.api_key.text().strip()) and self.duration > 0 and estimated_cost(self.duration, self.language.currentData()) <= self.cloud_budget.value()
         self.create.setEnabled(self.ready and available)
 
     def inspection_failed(self, message):
@@ -156,5 +167,5 @@ class SubtitleDialog(QDialog):
                 self.message.setText(str(error))
                 self.update_enabled()
                 return
-            self.window.worker.submit("subtitle_cloud", self.media_id, self.source, {"audio_index": self.audio.currentData(), "language": self.language.currentData(), "api_key": api_key, "approved_duration": self.duration})
+            self.window.worker.submit("subtitle_cloud", self.media_id, self.source, {"audio_index": self.audio.currentData(), "language": self.language.currentData(), "api_key": api_key, "approved_duration": self.duration, "mip_opt_out": self.cloud_privacy.isChecked(), "max_estimated_cost": self.cloud_budget.value()})
         self.accept()
