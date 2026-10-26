@@ -1,8 +1,10 @@
-# Lantern receiver protocol v1
+# Lantern receiver protocol v2
 
-The TV advertises `_lantern._tcp.local.` on TCP port 8765. TXT fields are `fn` (friendly name) and `version=1`. Windows discovers that service or connects to a user-entered private IPv4 address. Cast devices use their separate `_googlecast._tcp.local.` service and Cast protocol.
+The TV advertises `_lantern._tcp.local.` on TCP port 8765. TXT fields are `fn` (friendly name) and `version=2`. Discovery is a hint, not proof of identity. Windows discovers that service or connects to a user-entered private IPv4 address. Cast devices use their separate `_googlecast._tcp.local.` service and Cast protocol.
 
-Windows opens a WebSocket at `ws://TV_IP:8765/control`. Its first text message, within 15 seconds, is `{"type":"pair","version":1,"pin":"123456","name":"Windows PC"}`. The TV accepts its current six-digit screen PIN, expires the code after five minutes, and permits five failed attempts per peer per minute. A successful pairing replaces the previous sender connection. The response is `{"type":"pair.ok","version":1,"audioMimes":["audio/mp4a-latm"]}`. Other outcomes return an `error` message and close the socket.
+The TV serves TLS 1.2 or newer with a persistent AndroidKeyStore identity. Windows first retrieves the certificate without sending application data. For a new or changed identity, the user must compare the entire SHA-256 fingerprint shown on the TV. Windows then opens a certificate-pinned WebSocket at `wss://TV_IP:8765/control`; this handshake checks the same pin again before sending the PIN. Saved pins are updated only after successful pairing. No plaintext downgrade is supported.
+
+The first text message, within 15 seconds, is `{"type":"pair","version":2,"pin":"123456","name":"Windows PC","mediaPort":12345,"mediaFingerprint":"FULL_64_HEX_SHA256"}`. The TV accepts its current six-digit screen PIN, expires the code after five minutes, and permits five failed attempts per peer per minute. A successful pairing replaces the previous sender connection. The response is `{"type":"pair.ok","version":2,"audioMimes":["audio/mp4a-latm"]}`. Other outcomes return an `error` message and close the socket. The TV pins media to the TCP peer address, media port, and certificate fingerprint supplied over this authenticated TLS channel.
 
 Messages after pairing:
 
@@ -32,6 +34,6 @@ second. Failed-PIN tracking is time-limited and bounded to 256 peers.
 | TV → Windows | `playback.state` | `id`, `playing`, `position` and `duration` in seconds, and `subtitleId` or null. Sent on changes and every second. |
 | TV → Windows | `error` | Human-readable `message`, optional media `id` and decoder `code`. |
 
-Windows hosts an HTTP server on an available TCP port. `/stream/{session-token}/{opaque-media-id}` supports GET, HEAD, and byte ranges. `/subtitle/{session-token}/{opaque-subtitle-id}` returns WebVTT, converting external SRT as needed. Only explicitly added files are addressable. No request path is interpreted as a filesystem path. Tokens are random 256-bit bearer values, revoked on stop/disconnect. URLs must never be logged or published. CORS is enabled for the Cast receiver; there are no browser cookies or ambient credentials.
+Windows hosts an HTTPS server on an available TCP port. `/stream/{session-token}/{opaque-media-id}` supports GET, HEAD, and byte ranges. `/subtitle/{session-token}/{opaque-subtitle-id}` returns WebVTT, converting external SRT as needed. Only explicitly added files are addressable. No request path is interpreted as a filesystem path. Tokens are random 256-bit bearer values, revoked on stop/disconnect. URLs must never be logged or published. The TV verifies the sender certificate and refuses redirects. The separate Google Cast compatibility path uses HTTP and CORS; there are no browser cookies or ambient credentials.
 
-The personal receiver uses unencrypted local HTTP/WebSocket transport and a screen PIN. Use a trusted private LAN. A public release should review authenticated encrypted pairing before extending this beyond that environment. The version field is mandatory; incompatible protocol versions are rejected.
+The version field is mandatory; incompatible protocol versions are rejected. Both applications must be updated together. Google Cast compatibility remains suitable only for a trusted private LAN.

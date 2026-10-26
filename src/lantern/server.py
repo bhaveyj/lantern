@@ -27,6 +27,9 @@ class MediaServer:
         self.subtitles: dict[str, Path] = {}
         self.runner: web.AppRunner | None = None
         self.port = 0
+        self.bind_host = "127.0.0.1"
+        self.scheme = "http"
+        self.site = None
         self.transports = weakref.WeakSet()
         self._subtitle_cache = OrderedDict()
         self._subtitle_cache_bytes = 0
@@ -111,9 +114,16 @@ class MediaServer:
     async def start(self) -> None:
         self.runner = web.AppRunner(self.app, access_log=None)
         await self.runner.setup()
-        site = web.TCPSite(self.runner, "0.0.0.0", 0)
-        await site.start()
-        self.port = site._server.sockets[0].getsockname()[1]
+        await self.configure("127.0.0.1")
+
+    async def configure(self, host: str, context=None):
+        if self.site:
+            await self.site.stop()
+        self.bind_host = host
+        self.scheme = "https" if context else "http"
+        self.site = web.TCPSite(self.runner, host, 0, ssl_context=context)
+        await self.site.start()
+        self.port = self.site._server.sockets[0].getsockname()[1]
 
     async def stop(self) -> None:
         if self.runner:
@@ -130,7 +140,7 @@ class MediaServer:
         self._subtitle_cache_bytes = 0
 
     def url(self, host: str, media_id: str) -> str:
-        return f"http://{host}:{self.port}/stream/{self.token}/{media_id}"
+        return f"{self.scheme}://{host}:{self.port}/stream/{self.token}/{media_id}"
 
     def subtitle_url(self, host: str, subtitle_id: str) -> str:
-        return f"http://{host}:{self.port}/subtitle/{self.token}/{subtitle_id}"
+        return f"{self.scheme}://{host}:{self.port}/subtitle/{self.token}/{subtitle_id}"

@@ -32,6 +32,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.RenderersFactory
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.text.TextRenderer
+import androidx.media3.datasource.DataSource
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
@@ -51,6 +52,7 @@ class MainActivity : Activity() {
 
     private val handler = Handler(Looper.getMainLooper())
     private val gate = sessionGate
+    private lateinit var identity: TlsIdentity
     private lateinit var server: ControlServer
     private lateinit var player: ExoPlayer
     private lateinit var playerView: PlayerView
@@ -94,6 +96,7 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         gate.refresh()
+        identity = TlsIdentity()
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
         // Media3 1.6.1's extracted cue samples can lose an in-progress cue
@@ -105,7 +108,7 @@ class MainActivity : Activity() {
             }
         }
         player = ExoPlayer.Builder(this, renderers)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(this).experimentalParseSubtitlesDuringExtraction(false))
+            .setMediaSourceFactory(DefaultMediaSourceFactory(DataSource.Factory { SecureMediaDataSource { if (::server.isInitialized) server.mediaPeer else null } }).experimentalParseSubtitlesDuringExtraction(false))
             .build()
         createUi()
         player.addListener(object : Player.Listener {
@@ -148,6 +151,7 @@ class MainActivity : Activity() {
             }
         } })
         try {
+            server.makeSecure(identity.context.serverSocketFactory, arrayOf("TLSv1.2"))
             // Sender pings every 10 seconds; NanoHTTPD's default 5-second read timeout is too short.
             server.start(30000, false)
             advertise()
@@ -219,6 +223,8 @@ class MainActivity : Activity() {
         codeCard.addView(text("PAIR YOUR TV", 11f, accent).apply { typeface = Typeface.DEFAULT_BOLD; letterSpacing = 0.12f })
         pinView = text(gate.pin.chunked(3).joinToString("  "), if (compact) 60f else 68f, accent).apply { typeface = Typeface.MONOSPACE; setPadding(0, dp(6), 0, dp(6)) }
         codeCard.addView(pinView)
+        codeCard.addView(text("VERIFY TV IDENTITY", 10f, TvTheme.muted))
+        codeCard.addView(text(identity.fingerprint.chunked(4).chunked(8).joinToString("\n") { it.joinToString(" ") }, 12f).apply { typeface = Typeface.MONOSPACE })
         connectionView = text("Ready to connect to your laptop.", 14f, TvTheme.muted)
         codeCard.addView(connectionView)
         welcomeBrowse = button("Browse your playlist", primary = true) { showPlaylist() }.apply { visibility = View.GONE; textSize = 16f }
@@ -451,7 +457,7 @@ class MainActivity : Activity() {
             override fun onServiceUnregistered(info: NsdServiceInfo) = Unit
             override fun onUnregistrationFailed(info: NsdServiceInfo, code: Int) = Unit
         }
-        val service = NsdServiceInfo().apply { serviceName = "Lantern · ${Build.MODEL}"; serviceType = "_lantern._tcp."; port = 8765; setAttribute("fn", "${Build.MODEL} · Lantern"); setAttribute("version", "1") }
+        val service = NsdServiceInfo().apply { serviceName = "Lantern · ${Build.MODEL}"; serviceType = "_lantern._tcp."; port = 8765; setAttribute("fn", "${Build.MODEL} · Lantern"); setAttribute("version", "2") }
         nsd?.registerService(service, NsdManager.PROTOCOL_DNS_SD, registration)
     }
 

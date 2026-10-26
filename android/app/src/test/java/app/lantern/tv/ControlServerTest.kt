@@ -39,7 +39,7 @@ class ControlServerTest {
         server.start(3000, false)
         try {
             Peer(server.listeningPort).use { peer ->
-                peer.send(JSONObject().put("type", "pair").put("version", 1).put("pin", gate.pin).put("name", "Test PC").toString())
+                peer.send(JSONObject().put("type", "pair").put("version", 2).put("pin", gate.pin).put("name", "Test PC").put("mediaPort", 12345).put("mediaFingerprint", "a".repeat(64)).toString())
                 assertEquals("pair.ok", peer.receive().optString("type"))
                 peer.send("""{"type":"playback.command","action":"seek","value":"invalid"}""")
                 assertEquals("INVALID_COMMAND", peer.receive().optString("code"))

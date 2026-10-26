@@ -619,6 +619,9 @@ class Window(QMainWindow):
             pin, ok = QInputDialog.getText(self, "Pair with your TV", "Enter the six-digit code shown in Lantern on the TV:")
             if not ok:
                 return
+        else:
+            if QMessageBox.question(self, "Google Cast connection", "Google Cast uses a compatibility connection with unencrypted local media URLs. Continue on this trusted home network?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                return
         self.sync_library()
         self.worker.submit("connect", device, pin.strip())
 
@@ -668,6 +671,13 @@ class Window(QMainWindow):
             self.worker.submit("command", action, value)
 
     def on_event(self, event, data):
+        if event == "receiver.trust_required":
+            value = data["fingerprint"]
+            display = "\n".join(" ".join(value[i:i + 4] for i in range(row, min(row + 32, len(value)), 4)) for row in range(0, len(value), 32))
+            warning = "The TV identity has changed. " if data["changed"] else "First connection to this TV. "
+            approved = QMessageBox.question(self, "Verify TV identity", warning + "Compare the complete identity below with VERIFY TV IDENTITY on your TV. Trust it only if every group matches.\n\n" + display, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+            self.worker.submit("trust_receiver", value, approved == QMessageBox.StandardButton.Yes)
+            return
         if event == "worker.closed":
             self.finish_quit()
             return

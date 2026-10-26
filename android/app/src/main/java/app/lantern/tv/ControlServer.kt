@@ -23,6 +23,8 @@ class ControlServer(
     }
 ) : NanoWSD(port) {
     @Volatile private var owner: Peer? = null
+    @Volatile var mediaPeer: MediaPeer? = null
+        private set
     private val deadlines = Executors.newSingleThreadScheduledExecutor { task -> Thread(task, "lantern-pairing-deadline").apply { isDaemon = true } }
 
     init {
@@ -41,6 +43,7 @@ class ControlServer(
     fun shutdown() {
         val previous = owner
         owner = null
+        mediaPeer = null
         previous?.expire()
         super.stop()
         deadlines.shutdownNow()
@@ -49,7 +52,7 @@ class ControlServer(
     override fun openWebSocket(handshake: NanoHTTPD.IHTTPSession): WebSocket = Peer(handshake)
 
     override fun serveHttp(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response =
-        NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.OK, "application/json", "{\"name\":\"Lantern TV\",\"version\":1}")
+        NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.OK, "application/json", "{\"name\":\"Lantern TV\",\"version\":2}")
 
     private inner class Peer(private val handshake: NanoHTTPD.IHTTPSession) : WebSocket(handshake) {
         @Volatile private var paired = false
@@ -87,14 +90,15 @@ class ControlServer(
                 if (!paired) {
                     ControlLimits.text(message.optString("name", "Windows PC"), 128)
                     val accepted = System.nanoTime() - opened < TimeUnit.MILLISECONDS.toNanos(pairingTimeoutMs) &&
-                        message.optString("type") == "pair" && message.optInt("version") == 1 &&
+                        message.optString("type") == "pair" && message.optInt("version") == 2 &&
                         gate.accept(handshake.remoteIpAddress, message.optString("pin"))
                     if (!accepted) {
                         send(JSONObject().put("type", "error").put("message", "Code incorrect or expired. Read the code on the TV and try again.").toString())
                         close(WebSocketFrame.CloseCode.PolicyViolation, "Pairing rejected", false)
                         return
                     }
-                    send(JSONObject().put("type", "pair.ok").put("version", 1).put("audioMimes", JSONArray(audioMimes())).toString())
+                    val trustedMedia = MediaPeer.fromPair(handshake.remoteIpAddress, message)
+                    send(JSONObject().put("type", "pair.ok").put("version", 2).put("audioMimes", JSONArray(audioMimes())).toString())
                     // Publish the acknowledgement before the ticker can send
                     // playback state to this peer during the pairing handshake.
                     paired = true
@@ -102,6 +106,7 @@ class ControlServer(
                     val previous = synchronized(this@ControlServer) {
                         val old = owner
                         owner = this
+                        mediaPeer = trustedMedia
                         old
                     }
                     previous?.expire()
@@ -124,7 +129,7 @@ class ControlServer(
             deadline?.cancel(false)
             outbound.close()
             val wasOwner = synchronized(this@ControlServer) {
-                if (owner === this) { owner = null; true } else false
+                if (owner === this) { owner = null; mediaPeer = null; true } else false
             }
             if (wasOwner) connected(null)
         }

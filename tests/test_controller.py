@@ -8,6 +8,7 @@ from aiohttp import web
 
 from lantern.controller import Controller, Device, validate_host
 from lantern.media import Probe
+from lantern.security import LocalIdentity
 
 
 def test_only_local_ip_addresses_are_accepted():
@@ -23,12 +24,13 @@ async def test_receiver_pair_playlist_state_and_stop(aiohttp_server, tmp_path):
         ws = web.WebSocketResponse()
         await ws.prepare(request)
         hello = await ws.receive_json()
-        assert hello["type"] == "pair" and hello["version"] == 1
+        assert hello["type"] == "pair" and hello["version"] == 2
+        assert len(hello["mediaFingerprint"]) == 64 and hello["mediaPort"] > 0
         if hello["pin"] != "123456":
             await ws.send_json({"type": "error", "message": "Wrong code"})
             await ws.close()
             return ws
-        await ws.send_json({"type": "pair.ok", "audioMimes": ["audio/mp4a-latm"]})
+        await ws.send_json({"type": "pair.ok", "version": 2, "audioMimes": ["audio/mp4a-latm"]})
         await ws.send_json({"type": "playback.state", "id": "test", "playing": True, "position": 5, "duration": 20})
         async for frame in ws:
             if frame.type == web.WSMsgType.TEXT:
@@ -37,7 +39,8 @@ async def test_receiver_pair_playlist_state_and_stop(aiohttp_server, tmp_path):
         return ws
     app = web.Application()
     app.router.add_get("/control", receiver)
-    tv = await aiohttp_server(app)
+    identity = LocalIdentity(tmp_path / "tv-identity")
+    tv = await aiohttp_server(app, ssl=identity.context)
     events = []
     controller = Controller(tmp_path / "cache", lambda kind, data: events.append((kind, data)))
     await controller.start()
@@ -47,8 +50,8 @@ async def test_receiver_pair_playlist_state_and_stop(aiohttp_server, tmp_path):
     device = asdict(Device("test-tv", "Living Room", "127.0.0.1", tv.port, "receiver"))
     try:
         with pytest.raises(ValueError, match="Wrong code"):
-            await controller.connect(device, "000000")
-        await controller.connect(device, "123456")
+            await controller.connect(device, "000000", identity.fingerprint)
+        await controller.connect(device, "123456", identity.fingerprint)
         await asyncio.sleep(0.05)
         assert any(kind == "connected" for kind, _ in events)
         assert controller.current_position == 5
@@ -114,7 +117,7 @@ async def test_receiver_keepalive_survives_continuous_state_updates(aiohttp_serv
         ws = web.WebSocketResponse(autoping=False)
         await ws.prepare(request)
         await ws.receive_json()
-        await ws.send_json({"type": "pair.ok", "audioMimes": []})
+        await ws.send_json({"type": "pair.ok", "version": 2, "audioMimes": []})
 
         async def state_updates():
             while not ws.closed:
@@ -143,12 +146,13 @@ async def test_receiver_keepalive_survives_continuous_state_updates(aiohttp_serv
 
     app = web.Application()
     app.router.add_get("/control", receiver)
-    tv = await aiohttp_server(app)
+    identity = LocalIdentity(tmp_path / "tv-identity")
+    tv = await aiohttp_server(app, ssl=identity.context)
     events = []
     controller = Controller(tmp_path / "cache", lambda kind, data: events.append((kind, data)))
     await controller.start()
     try:
-        await controller.connect(asdict(Device("test-tv", "TV", "127.0.0.1", tv.port, "receiver")), "123456")
+        await controller.connect(asdict(Device("test-tv", "TV", "127.0.0.1", tv.port, "receiver")), "123456", identity.fingerprint)
         await asyncio.sleep(1.2)
         assert not timed_out, "Frequent TV state updates must not suppress outbound keepalive pings"
         assert len(pings) >= 3
@@ -229,7 +233,7 @@ async def test_connection_attempts_are_serialized(monkeypatch, tmp_path):
     release = asyncio.Event()
     order = []
 
-    async def connect(device, pin):
+    async def connect(device, pin, trusted_fingerprint=""):
         order.append(device["id"])
         if device["id"] == "first":
             entered.set()

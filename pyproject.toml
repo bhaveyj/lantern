@@ -14,6 +14,7 @@ dependencies = [
   "PyChromecast>=14,<15",
   "faster-whisper>=1.2,<2",
   "av>=16,<17",
+  "cryptography>=50.0.2,<51",
 ]
 
 [project.optional-dependencies]

@@ -2,7 +2,7 @@
 
 Lantern streams personal video and audio from a Windows PC to an Android/Google TV receiver or a Google Cast device. The Windows sender remembers file references, serves media only across the local network, and keeps the playlist and playback controls synchronized. The Android TV receiver adds remote-control playback, captions, and picture-fit controls.
 
-This repository contains a personal development build, not a production-ready media service. The custom receiver uses unencrypted HTTP/WebSocket traffic protected by a short-lived screen PIN, so use it only on a trusted private LAN. No router port forwarding is required.
+This repository contains a personal development build. The custom receiver uses TLS, verified TV certificate identities, and a short-lived screen PIN. Google Cast compatibility streams remain unencrypted and require a trusted private LAN. No router port forwarding is required.
 
 ## What Lantern does
 
@@ -22,7 +22,7 @@ If you already have the generated files, start the Windows sender with `run.ps1`
 
 1. Put the PC and TV on the same trusted home network. Avoid guest Wi-Fi, VPN-only routes, and router client isolation.
 2. Open Lantern TV on the TV and leave its pairing screen visible.
-3. Open Lantern on Windows. Select the discovered Lantern receiver, click **Connect**, and enter the six-digit code shown on the TV.
+3. Open Lantern on Windows. Select the discovered Lantern receiver, click **Connect**, and enter the six-digit code shown on the TV. On first pairing, compare the complete **VERIFY TV IDENTITY** fingerprint with the TV before approving. A changed identity requires verification again.
 4. Add media on Windows and choose **Play on TV**. The playlist can be reordered from Windows or from the TV remote.
 5. For Google Cast, select the separate **Google Cast** device. Cast does not use the Lantern PIN or custom receiver.
 
@@ -132,7 +132,7 @@ Optional checks:
 ./.venv/Scripts/python.exe scripts/check_windowed_media.py C:\media\movie.mkv .tmp\media-check.json
 
 # Exercise a physical Lantern receiver. The video should be a compatible local file.
-./.venv/Scripts/python.exe scripts/device_smoke.py TV_IP --pin 123456 --video C:\media\sample.mp4
+./.venv/Scripts/python.exe scripts/device_smoke.py TV_IP --pin 123456 --fingerprint FULL_SHA256_FROM_TV --video C:\media\sample.mp4
 
 # Exercise a Cast device instead of the custom receiver.
 ./.venv/Scripts/python.exe scripts/device_smoke.py CAST_IP --cast --video C:\media\sample.mp4
@@ -160,7 +160,9 @@ Cloud generation excludes uploads from Deepgram model improvement by default (`m
 
 The custom receiver advertises `_lantern._tcp.local.` and listens on TCP port `8765`. The sender opens a WebSocket at `/control`, pairs with the six-digit TV PIN, and sends a fixed WebSocket PING every 10 seconds to keep the receiver alive during quiet playback. The sender's media server listens on an available TCP port and exposes only explicitly added files using random session tokens and byte-range support.
 
-The custom transport is local, cleartext HTTP/WebSocket. It is suitable for a trusted home network, not an untrusted or public network. Do not publish session URLs, enable router port forwarding, or use the custom receiver across a network you do not control. The protocol and message formats are documented in [`docs/protocol.md`](docs/protocol.md).
+The custom receiver uses TLS 1.2 or newer. Windows pins the TV's SHA-256 certificate fingerprint after the user compares it on the TV, before sending the PIN. The authenticated pairing sends the Windows media server's certificate fingerprint, and the TV accepts HTTPS media only from that pinned sender. There is no automatic plaintext fallback; both apps must support protocol v2. The TV key lives in AndroidKeyStore; Windows encrypts its media key and protects its password with the current user's DPAPI identity. Clearing app data removes these identities.
+
+Google Cast's default receiver requires a separate HTTP compatibility path. Windows warns before connecting, and Cast should be used only on a trusted LAN. Do not publish session URLs or enable router port forwarding. The media listener binds loopback while idle and the selected network interface while connected. The protocol and message formats are documented in [`docs/protocol.md`](docs/protocol.md).
 
 ## Repository layout
 
@@ -169,7 +171,7 @@ src/lantern/              Windows sender, controller, media server, library
 android/app/src/          Android TV receiver and pairing/control server
 tests/                    Python unit and integration tests
 scripts/                  Bootstrap, build, firewall, smoke-test, and tooling scripts
-docs/protocol.md          Receiver protocol v1
+docs/protocol.md          Receiver protocol v2
 docs/testing.md           Physical-device stability test procedure
 pyproject.toml            Python package metadata and dependency ranges
 requirements-lock.txt     Tested Python dependency resolution

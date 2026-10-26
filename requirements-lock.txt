@@ -7,10 +7,12 @@ attrs==26.1.0
 av==16.1.0
 casttube==0.2.1
 certifi==2026.10.19
+cffi==2.1.1
 charset-normalizer==3.5.2
 click==8.5.0
 colorama==0.4.6
 ctranslate2==4.8.3
+cryptography==50.0.2
 faster-whisper==1.2.1
 filelock==4.2.4
 flatbuffers==25.12.19
@@ -31,6 +33,7 @@ packaging==26.3
 pefile==2024.8.26
 pluggy==1.7.0
 propcache==0.5.4
+pycparser==3.12
 protobuf==7.36.2
 PyChromecast==14.0.10
 Pygments==2.21.0
