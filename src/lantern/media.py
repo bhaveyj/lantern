@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -11,6 +12,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+
+from .native_media import LOCAL_INPUT, PROBE_FIELDS, communicate_bounded, read_tail
 
 GIB = 1024 ** 3
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
@@ -40,20 +43,17 @@ class Probe:
 
 
 async def probe(path: Path) -> Probe:
-    process = await asyncio.create_subprocess_exec(tool_path("ffprobe"), "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, creationflags=CREATE_NO_WINDOW)
-    try:
-        output, error = await asyncio.wait_for(process.communicate(), timeout=30)
-    finally:
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
+    process = await asyncio.create_subprocess_exec(tool_path("ffprobe"), "-v", "error", *LOCAL_INPUT, "-show_entries", PROBE_FIELDS, "-of", "json", str(path.resolve()), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, creationflags=CREATE_NO_WINDOW)
+    output, error = await communicate_bounded(process, 30)
     if process.returncode:
         raise RuntimeError(error.decode(errors="replace").strip() or "Could not inspect this media file.")
     data = json.loads(output)
     streams = data.get("streams", [])
     video = next((s for s in streams if s["codec_type"] == "video" and not s.get("disposition", {}).get("attached_pic")), {})
     audio = next((s for s in streams if s["codec_type"] == "audio"), {})
-    return Probe(video.get("codec_name"), audio.get("codec_name"), float(data.get("format", {}).get("duration", 0)), data.get("format", {}).get("format_name", ""), audio.get("channels"), video.get("index"), audio.get("index"))
+    duration = float(data.get("format", {}).get("duration", 0))
+    duration = duration if math.isfinite(duration) and duration > 0 else 0
+    return Probe(video.get("codec_name"), audio.get("codec_name"), duration, data.get("format", {}).get("format_name", ""), audio.get("channels"), video.get("index"), audio.get("index"))
 
 
 @dataclass(frozen=True)
@@ -154,12 +154,13 @@ class Preparation:
         audio_map = f"0:{info.audio_index}" if info.audio_index is not None else "0:a:0?"
         maps = (["-map", video_map] if info.video else []) + (["-map", audio_map] if info.audio else [])
         audio_args = ["-c:a", "copy"] if copy_audio else ["-c:a", "aac", "-ac", "2", "-b:a", "192k"]
-        args = [tool_path("ffmpeg"), "-hide_banner", "-loglevel", "error", "-y", "-i", str(path), *maps, "-c:v", "copy", *audio_args, "-sn", "-movflags", "+faststart", "-progress", "pipe:1", "-f", "mp4", str(partial)]
+        args = [tool_path("ffmpeg"), "-nostdin", "-hide_banner", "-loglevel", "error", "-y", *LOCAL_INPUT, "-i", str(path.resolve()), *maps, "-c:v", "copy", *audio_args, "-sn", "-movflags", "+faststart", "-progress", "pipe:1", "-f", "mp4", str(partial)]
         self.process = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, creationflags=CREATE_NO_WINDOW)
         process = self.process
-        stderr = asyncio.create_task(process.stderr.read())
+        stderr = asyncio.create_task(read_tail(process.stderr))
+        deadline = asyncio.get_running_loop().time() + min(7200, max(120, info.duration * 2 + 60))
         try:
-            async for raw in process.stdout:
+            while raw := await asyncio.wait_for(process.stdout.readline(), min(90, max(0.01, deadline - asyncio.get_running_loop().time()))):
                 line = raw.decode(errors="replace").strip()
                 if line.startswith("out_time_us="):
                     try:

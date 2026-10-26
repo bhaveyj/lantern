@@ -156,6 +156,8 @@ An optional **Generate with Deepgram** method uploads only the selected audio tr
 
 Cloud generation excludes uploads from Deepgram model improvement by default (`mip_opt_out=true`). The dialog explains the privacy choice and starts with a US$1 maximum estimated cost per job; raise it deliberately for longer audio. This checks Lantern's estimate, not a provider-enforced billing cap. Deepgram's published Pay As You Go/Growth rates do not change for opt-out as of 26 Oct 2026. Cached results remain reusable and the choice does not change retention of earlier uploads.
 
+Media subprocesses accept a fixed set of file container formats and local file/pipe protocols; playlist, script, device, and network inputs are excluded. Probe output and captured error output are bounded, individual FFmpeg allocations are capped, and preparation has idle/overall deadlines. These restrictions reduce exposure to malicious files but do not constitute an operating-system sandbox. Keep native media tools updated.
+
 ## Network and security model
 
 The custom receiver advertises `_lantern._tcp.local.` and listens on TCP port `8765`. The sender opens a WebSocket at `/control`, pairs with the six-digit TV PIN, and sends a fixed WebSocket PING every 10 seconds to keep the receiver alive during quiet playback. The sender's media server listens on an available TCP port and exposes only explicitly added files using random session tokens and byte-range support.

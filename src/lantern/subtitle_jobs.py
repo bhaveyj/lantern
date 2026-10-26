@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Callable
 
 from .media import CREATE_NO_WINDOW, tool_path
+from .native_media import LOCAL_INPUT, PROBE_FIELDS, communicate_bounded, read_tail
 from .speech_models import MODELS, MODEL_REVISIONS
 from .cloud_subtitles import transcribe as cloud_transcribe, estimated_cost
 
@@ -47,7 +48,7 @@ async def run_tool(*args: str, timeout: float = 120) -> bytes:
         creationflags=JOB_FLAGS,
     )
     try:
-        output, error = await asyncio.wait_for(process.communicate(), timeout)
+        output, error = await communicate_bounded(process, timeout)
         if process.returncode:
             raise ValueError(error.decode(errors="replace")[-1200:] or "The media tool could not complete this job.")
         return output
@@ -56,13 +57,13 @@ async def run_tool(*args: str, timeout: float = 120) -> bytes:
     finally:
         if process.returncode is None:
             process.kill()
-            await process.communicate()
+            await process.wait()
 
 
 async def inspect_media(path: Path) -> Inspection:
     if not await asyncio.to_thread(path.is_file):
         raise ValueError("The original media file is no longer available.")
-    output = await run_tool(tool_path("ffprobe"), "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path), timeout=30)
+    output = await run_tool(tool_path("ffprobe"), "-v", "error", *LOCAL_INPUT, "-show_entries", PROBE_FIELDS, "-of", "json", str(path.resolve()), timeout=30)
     document = json.loads(output)
     duration = float(document.get("format", {}).get("duration", 0))
     duration = duration if math.isfinite(duration) and duration > 0 else 0
@@ -203,7 +204,7 @@ class SubtitleJobs:
         partial = folder / f"{uuid.uuid4().hex}.part"
         self.emit("subtitles.progress", {"message": "Extracting embedded subtitles…", "percent": None})
         try:
-            await run_tool(tool_path("ffmpeg"), "-nostdin", "-v", "error", "-y", "-i", str(source), "-map", f"0:{track.index}", "-c:s", "srt", "-f", "srt", str(partial))
+            await run_tool(tool_path("ffmpeg"), "-nostdin", "-v", "error", "-y", *LOCAL_INPUT, "-i", str(source.resolve()), "-map", f"0:{track.index}", "-c:s", "srt", "-f", "srt", str(partial))
             await asyncio.to_thread(validate_subtitle, partial)
             if stamp != await asyncio.to_thread(source_stamp, source):
                 raise ValueError("The media file changed during extraction. Try again.")
@@ -217,14 +218,15 @@ class SubtitleJobs:
         if estimated > MAX_AUDIO_BYTES or shutil.disk_usage(destination.parent).free < estimated + 1024**3:
             raise ValueError("Not enough temporary space for this audio track while leaving 1 GiB free, or the track exceeds the 1 GiB audio limit.")
         process = await asyncio.create_subprocess_exec(
-            tool_path("ffmpeg"), "-nostdin", "-v", "error", "-y", "-threads", str(threads), "-i", str(source),
+            tool_path("ffmpeg"), "-nostdin", "-v", "error", "-y", "-threads", str(threads), *LOCAL_INPUT, "-i", str(source.resolve()),
             "-map", f"0:{track}", "-vn", "-sn", "-ac", "1", "-ar", "16000", "-c:a", "flac",
             "-threads", str(threads), "-progress", "pipe:1", str(destination),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, creationflags=JOB_FLAGS,
         )
-        error_task = asyncio.create_task(process.stderr.read())
+        error_task = asyncio.create_task(read_tail(process.stderr))
+        deadline = asyncio.get_running_loop().time() + min(7200, max(120, duration * 2 + 60))
         try:
-            while raw := await asyncio.wait_for(process.stdout.readline(), 90):
+            while raw := await asyncio.wait_for(process.stdout.readline(), min(90, max(0.01, deadline - asyncio.get_running_loop().time()))):
                 line = raw.decode(errors="replace").strip()
                 if line.startswith("out_time_us="):
                     percent = min(99, int(line.split("=", 1)[1]) / max(duration * 10000, 1))
