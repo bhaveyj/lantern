@@ -8,12 +8,13 @@ connection alive and that their task is cancelled on disconnect.
 The optional `--check-receiver CONFIG_JSON` development entry point exercises
 the installed executable, including its actual LAN media server and firewall
 identity. Use a compatible local video at least five minutes long, open Lantern
-on the TV, and create a local configuration containing its current pairing code:
+on the TV, compare its complete SHA-256 identity, and create a local configuration containing that fingerprint and its current pairing code:
 
 ```json
 {
   "host": "192.168.1.10",
   "pin": "CURRENT_SIX_DIGIT_CODE",
+  "fingerprint": "FULL_64_HEX_SHA256_VERIFIED_ON_TV",
   "video": "C:/Videos/example.mkv",
   "report": "C:/path/to/project/artifacts/receiver-wifi-stability.json",
   "playSeconds": 180,
