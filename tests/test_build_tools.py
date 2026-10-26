@@ -28,9 +28,25 @@ def test_runtime_bootstrap_skips_optional_research_tools(tmp_path, monkeypatch):
     (tmp_path / "gradle-8.10.2" / "bin").mkdir(parents=True)
     (tmp_path / "gradle-8.10.2" / "bin" / "gradle.bat").touch()
     monkeypatch.setattr(setup_tools, "TOOLS", tmp_path)
+    monkeypatch.setattr(setup_tools, "runtime_tools_valid", lambda *args: True)
     calls = []
     monkeypatch.setattr(setup_tools, "setup_research_tools", lambda records: calls.append(True))
     setup_tools.main()
     assert not calls
     setup_tools.main(research=True)
     assert calls == [True]
+
+
+def test_cached_media_executables_are_verified(tmp_path):
+    (tmp_path / "ffmpeg.exe").write_bytes(b"modified executable")
+    (tmp_path / "ffprobe.exe").write_bytes(b"modified executable")
+    assert not setup_tools.runtime_tools_valid(tmp_path)
+
+
+def test_bad_download_preserves_existing_archive(tmp_path, monkeypatch):
+    destination = tmp_path / "tool.zip"
+    destination.write_bytes(b"old archive")
+    monkeypatch.setattr(setup_tools.subprocess, "run", lambda *args, **kwargs: destination.with_suffix(".zip.download").write_bytes(b"bad download"))
+    with pytest.raises(RuntimeError, match="Checksum mismatch"):
+        setup_tools.fetch("https://example.com/tool.zip", destination, "a" * 64)
+    assert destination.read_bytes() == b"old archive"

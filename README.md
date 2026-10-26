@@ -55,6 +55,8 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 
 `bootstrap.ps1` installs the tested Python versions from `requirements-lock.txt`, then creates the editable project installation using that environment. Windows packaging checks the installed versions against the lock before producing a distribution. Dependency upgrades should deliberately update the lock and pass the regression suite before packaging.
 
+Native tool URLs, versions, archive hashes, and bundled media executable hashes are pinned in `scripts/toolchain-lock.json`. Bootstrap verifies downloads before extracting them and restores modified FFmpeg binaries; Windows packaging verifies those binaries again. Changing the lock requires deliberate upstream verification and regression testing. Existing Java/SDK/global Gradle installations remain part of the trusted developer environment.
+
 Start the sender from the repository root:
 
 ```powershell
@@ -126,6 +128,8 @@ Run the automated Python suite from the repository root:
 ```
 
 The suite covers library persistence, pairing/control integration, receiver keepalives, Cast startup and polling, media codec decisions, FFmpeg preparation, subtitles, authorized/ranged streaming, and large-file seeking. Android unit tests run as part of `scripts/build-android.ps1`.
+
+GitHub CI runs the regression suites, verifies media tools, scans Git history with pinned Gitleaks, and audits exact Python plus resolved Android Maven dependencies against OSV on pushes and pull requests. An unavailable or incomplete dependency scan fails the check. Native FFmpeg/Qt/ML library advisories still require upstream review; a clean package scan is not a guarantee of safety. CI does not publish or deploy artifacts.
 
 Optional checks:
 

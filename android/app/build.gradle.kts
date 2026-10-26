@@ -1,3 +1,5 @@
+import groovy.json.JsonOutput
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -49,4 +51,19 @@ dependencies {
     implementation("org.nanohttpd:nanohttpd:2.3.1")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
+}
+
+tasks.register("securityDependencyInventory") {
+    doLast {
+        val packages = listOf("debugRuntimeClasspath", "debugUnitTestRuntimeClasspath").flatMap { name ->
+            configurations.getByName(name).resolvedConfiguration.resolvedArtifacts.map { artifact ->
+                val id = artifact.moduleVersion.id
+                mapOf("name" to "${id.group}:${id.name}", "version" to id.version)
+            }
+        }.distinct().sortedBy { it["name"] }
+        val output = rootProject.file("../.tmp/android-dependencies.json")
+        output.parentFile.mkdirs()
+        output.writeText(JsonOutput.prettyPrint(JsonOutput.toJson(packages)))
+        println("Wrote ${packages.size} resolved Maven dependencies for the OSV audit.")
+    }
 }

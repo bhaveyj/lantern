@@ -8,6 +8,8 @@ $env:TEMP = Join-Path $projectRoot '.tmp'
 $env:TMP = $env:TEMP
 & '.\.venv\Scripts\python.exe' scripts/check_dependencies.py
 if ($LASTEXITCODE) { throw 'Restore the tested dependency versions with scripts/bootstrap.ps1 before packaging.' }
+& '.\.venv\Scripts\python.exe' scripts/check_tools.py
+if ($LASTEXITCODE) { throw 'Restore verified media tools before packaging.' }
 & '.\.venv\Scripts\python.exe' scripts/generate_windows_icon.py
 if ($LASTEXITCODE) { throw 'Windows icon generation failed.' }
 $buildPath = $env:PATH
