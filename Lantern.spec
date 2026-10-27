@@ -2,8 +2,8 @@
 from PyInstaller.utils.hooks import collect_all
 from PyInstaller.utils.hooks import copy_metadata
 
-datas = [('.tools/ffmpeg', 'tools')]
-binaries = []
+datas = [('.tools/ffmpeg', 'tools'), ('.tools/pairing/BORINGSSL-LICENSE.txt', 'pairing')]
+binaries = [('.tools/pairing/lantern_pake.dll', 'pairing')]
 hiddenimports = []
 datas += copy_metadata('lantern-tv', recursive=True)
 tmp_ret = collect_all('faster_whisper')

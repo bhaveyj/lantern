@@ -8,6 +8,7 @@ import pytest
 from lantern.diagnostics import check_receiver
 from lantern.media import Probe
 from lantern.security import LocalIdentity
+from pairing_peer import accept
 
 
 async def test_diagnostic_entry_point_uses_verified_tls_and_pinned_media(aiohttp_server, monkeypatch, tmp_path):
@@ -19,9 +20,7 @@ async def test_diagnostic_entry_point_uses_verified_tls_and_pinned_media(aiohttp
     async def receiver(request):
         ws = web.WebSocketResponse()
         await ws.prepare(request)
-        pair = await ws.receive_json()
-        assert pair["version"] == 2
-        await ws.send_json({"type": "pair.ok", "version": 2, "audioMimes": ["audio/mp4a-latm"]})
+        pair = await accept(ws, identity.fingerprint)
         async for frame in ws:
             if frame.type != aiohttp.WSMsgType.TEXT:
                 continue
@@ -43,7 +42,7 @@ async def test_diagnostic_entry_point_uses_verified_tls_and_pinned_media(aiohttp
     source.write_bytes(b"diagnostic media bytes")
     report = tmp_path / "report.json"
     config = tmp_path / "config.json"
-    config.write_text(json.dumps({"host": "127.0.0.1", "port": server.port, "fingerprint": identity.fingerprint, "pin": "123456", "video": str(source), "report": str(report), "playSeconds": 0, "pauseSeconds": 0, "resumeSeconds": 0}))
+    config.write_text(json.dumps({"host": "127.0.0.1", "port": server.port, "pin": "123456", "video": str(source), "report": str(report), "playSeconds": 0, "pauseSeconds": 0, "resumeSeconds": 0}))
     data = tmp_path / "data"
     data.mkdir()
     await asyncio.wait_for(asyncio.to_thread(check_receiver, config, data), 15)

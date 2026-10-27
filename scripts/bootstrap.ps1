@@ -16,4 +16,5 @@ if ($LASTEXITCODE) { throw 'Editable project installation failed.' }
 $toolArgs = if ($ResearchTools) { @('--research') } else { @() }
 & '.\.venv\Scripts\python.exe' scripts/setup_tools.py @toolArgs
 if ($LASTEXITCODE) { throw 'Tool download failed.' }
+& (Join-Path $PSScriptRoot 'build-pairing.ps1')
 Write-Host 'Run .\run.ps1 to open Lantern.'

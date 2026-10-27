@@ -48,9 +48,9 @@ async def run(args):
 
     try:
         await controller.sync(items)
-        await controller.connect(asdict(Device("physical-tv", "Sony BRAVIA", args.host, 8009 if args.cast else 8765, "cast" if args.cast else "receiver")), args.pin, args.fingerprint)
+        await controller.connect(asdict(Device("physical-tv", "Sony BRAVIA", args.host, 8009 if args.cast else 8765, "cast" if args.cast else "receiver")), args.pin)
         if not args.cast and controller.ws is None:
-            raise ValueError("Verify the TV's full SHA-256 identity and supply --fingerprint before testing.")
+            raise ValueError("Supply the TV's six-digit code with --pin for first-time pairing.")
         await controller.play("sample-one")
         await state_matches(lambda s: s.get("playing") and s.get("duration", 0) > 40 and s.get("position", 0) > 0, "local video starts")
         await controller.command("volume", 0.2)
@@ -108,7 +108,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("host")
     parser.add_argument("--pin", default="")
-    parser.add_argument("--fingerprint", default="", help="Full SHA-256 identity verified on the TV screen")
     parser.add_argument("--cast", action="store_true")
     parser.add_argument("--video", type=Path, default=Path(".tmp/lantern-sample.mp4"))
     parser.add_argument("--hold", type=int, default=90)

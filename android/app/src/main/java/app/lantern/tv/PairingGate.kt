@@ -3,7 +3,8 @@ package app.lantern.tv
 import java.security.SecureRandom
 
 /** Short-lived PIN with per-peer and receiver-wide failed-attempt limits. */
-class PairingGate(private val now: () -> Long = { System.currentTimeMillis() }) {
+class PairingGate(private val now: () -> Long = { System.nanoTime() / 1000000 }) {
+    data class Attempt(val pin: String, val created: Long)
     private val random = SecureRandom()
     var pin: String = newPin()
         private set
@@ -12,6 +13,23 @@ class PairingGate(private val now: () -> Long = { System.currentTimeMillis() }) 
     private val globalFailures = mutableListOf<Long>()
 
     private fun newPin() = (100000 + random.nextInt(900000)).toString()
+
+    @Synchronized fun begin(peer: String): Attempt? {
+        refresh()
+        globalFailures.removeAll { now() - it > 60000 }
+        failures.entries.removeAll { entry -> entry.value.removeAll { now() - it > 60000 }; entry.value.isEmpty() }
+        if (globalFailures.size >= 25 || (peer !in failures && failures.size >= 256)) return null
+        val attempts = failures.getOrPut(peer) { mutableListOf() }
+        if (attempts.size >= 5) return null
+        attempts.add(now())
+        globalFailures.add(now())
+        return Attempt(pin, created)
+    }
+    @Synchronized fun valid(attempt: Attempt): Boolean {
+        refresh()
+        return attempt.pin == pin && attempt.created == created
+    }
+    @Synchronized fun succeeded(peer: String) { failures.remove(peer) }
 
     @Synchronized fun refresh(): Boolean {
         if (now() - created < 300000) return false

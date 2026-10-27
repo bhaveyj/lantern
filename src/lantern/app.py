@@ -389,6 +389,16 @@ class Window(QMainWindow):
         manual.setObjectName("outline")
         manual.clicked.connect(self.manual_connect)
         row.addWidget(manual)
+        options = QPushButton("⋯")
+        options.setToolTip("Connection settings")
+        options.setAccessibleName("Connection settings")
+        options_menu = QMenu(options)
+        options_menu.addAction("Paired TVs…", lambda: self.worker.submit("paired_devices"))
+        options_menu.addAction("Advanced connection details…", lambda: self.worker.submit("connection_details"))
+        options_menu.addSeparator()
+        options_menu.addAction("Reset saved pairings…", self.reset_pairings)
+        options.setMenu(options_menu)
+        row.addWidget(options)
         layout.addWidget(connection)
 
         heading = QHBoxLayout()
@@ -613,13 +623,13 @@ class Window(QMainWindow):
             return
         self.connect_to(self.devices[device_id])
 
+    def reset_pairings(self):
+        if QMessageBox.question(self, "Reset saved pairings", "Forget all saved TVs? You’ll need their six-digit codes to connect again.", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+            self.worker.submit("reset_pairings")
+
     def connect_to(self, device):
         pin = ""
-        if device["kind"] == "receiver":
-            pin, ok = QInputDialog.getText(self, "Pair with your TV", "Enter the six-digit code shown in Lantern on the TV:")
-            if not ok:
-                return
-        else:
+        if device["kind"] != "receiver":
             if QMessageBox.question(self, "Google Cast connection", "Google Cast uses a compatibility connection with unencrypted local media URLs. Continue on this trusted home network?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
                 return
         self.sync_library()
@@ -671,12 +681,48 @@ class Window(QMainWindow):
             self.worker.submit("command", action, value)
 
     def on_event(self, event, data):
-        if event == "receiver.trust_required":
-            value = data["fingerprint"]
-            display = "\n".join(" ".join(value[i:i + 4] for i in range(row, min(row + 32, len(value)), 4)) for row in range(0, len(value), 32))
-            warning = "The TV identity has changed. " if data["changed"] else "First connection to this TV. "
-            approved = QMessageBox.question(self, "Verify TV identity", warning + "Compare the complete identity below with VERIFY TV IDENTITY on your TV. Trust it only if every group matches.\n\n" + display, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
-            self.worker.submit("trust_receiver", value, approved == QMessageBox.StandardButton.Yes)
+        if event == "pairing.code_required":
+            if self.quitting: return
+            prompt = ("Pair this TV again.\n\n" if data.get("again") else "") + "Enter the six-digit code shown in Lantern on your TV:"
+            pin, accepted = QInputDialog.getText(self, "Pair with your TV", prompt)
+            if accepted:
+                pin = "".join(pin.split())
+                if len(pin) != 6 or not pin.isascii() or not pin.isdigit():
+                    self.show_error("Enter all six digits from the TV screen.")
+                    return
+                self.worker.submit("connect", data["device"], pin)
+            else:
+                self.worker.submit("disconnect")
+            return
+        if event == "paired.devices":
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Paired TVs")
+            layout = QVBoxLayout(dialog)
+            layout.addWidget(QLabel("Saved TVs reconnect without entering a code."))
+            devices = QListWidget()
+            for item in data["items"]:
+                devices.addItem(item["name"])
+                devices.item(devices.count() - 1).setData(Qt.ItemDataRole.UserRole, item["identity"])
+            layout.addWidget(devices)
+            if not data["items"]: layout.addWidget(QLabel("No TVs paired yet. Select a TV and click Connect."))
+            forget = QPushButton("Forget selected TV")
+            forget.setEnabled(False)
+            devices.currentItemChanged.connect(lambda current, _: forget.setEnabled(current is not None))
+            def forget_selected():
+                selected = devices.currentItem()
+                if selected:
+                    self.worker.submit("forget_pairing", selected.data(Qt.ItemDataRole.UserRole))
+                    dialog.accept()
+            forget.clicked.connect(forget_selected)
+            layout.addWidget(forget)
+            dialog.exec()
+            return
+        if event == "connection.details":
+            identity = data.get("identity")
+            text = "Connect to a Lantern TV to view its details."
+            if identity:
+                text = "Connection: encrypted TLS\nPairing: remembered\n\nSHA-256 TV identity:\n" + " ".join(identity[index:index + 4] for index in range(0, len(identity), 4))
+            QMessageBox.information(self, "Advanced connection details", text)
             return
         if event == "worker.closed":
             self.finish_quit()

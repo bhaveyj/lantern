@@ -9,6 +9,7 @@ __pycache__/
 build/
 dist/
 android/.gradle/
+android/**/.cxx/
 android/local.properties
 android/**/build/
 .gradle/

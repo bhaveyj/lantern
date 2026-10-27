@@ -1,4 +1,9 @@
 {
+  "boringssl": {
+    "commit": "e651545da6e26e1f4420723a3b69a78ed1b9c51d",
+    "url": "https://codeload.github.com/google/boringssl/zip/e651545da6e26e1f4420723a3b69a78ed1b9c51d",
+    "sha256": "0cae0b5c8fc5c144ea8117a69b67dff4ce4507d882abc466f929e8504a601b62"
+  },
   "gradle": {
     "version": "8.10.2",
     "url": "https://services.gradle.org/distributions/gradle-8.10.2-bin.zip",

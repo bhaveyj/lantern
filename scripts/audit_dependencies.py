@@ -36,7 +36,7 @@ def query_osv(packages: list[dict]) -> list[dict]:
 def findings(packages: list[dict], results: list[dict]) -> list[str]:
     if len(packages) != len(results):
         raise ValueError("Incomplete audit results")
-    return [f"{package['package']['name']}=={package['version']}: {vulnerability['id']}" for package, result in zip(packages, results) for vulnerability in result.get("vulns", [])]
+    return [f"{('BoringSSL@' + package['commit']) if 'commit' in package else package['package']['name'] + '==' + package['version']}: {vulnerability['id']}" for package, result in zip(packages, results) for vulnerability in result.get("vulns", [])]
 
 
 def main():
@@ -48,13 +48,15 @@ def main():
     if args.maven:
         for package in json.loads(args.maven.read_text()):
             packages.append({"package": {"ecosystem": "Maven", "name": package["name"]}, "version": package["version"]})
+    native = json.loads((root / "scripts/toolchain-lock.json").read_text())["boringssl"]["commit"]
+    packages.append({"commit": native})
     try:
         issues = findings(packages, query_osv(packages))
     except Exception as error:
         raise SystemExit(f"Dependency audit could not complete: {type(error).__name__}. Retry before merging.") from None
     if issues:
         raise SystemExit("Vulnerable dependencies require review:\n" + "\n".join(issues))
-    print(f"OSV: no published advisories matched {len(packages)} exact Python/Maven package versions.")
+    print(f"OSV: no published advisories matched {len(packages) - 1} exact Python/Maven versions and the pinned BoringSSL commit.")
 
 
 if __name__ == "__main__":

@@ -7,10 +7,13 @@ plugins {
 
 val releaseVariables = listOf("LANTERN_ANDROID_KEYSTORE", "LANTERN_ANDROID_STORE_PASSWORD", "LANTERN_ANDROID_KEY_ALIAS", "LANTERN_ANDROID_KEY_PASSWORD")
 val hasReleaseSigning = releaseVariables.all { !System.getenv(it).isNullOrBlank() }
+val pairingSource = groovy.json.JsonSlurper().parse(rootProject.file("../scripts/toolchain-lock.json")) as Map<*, *>
+val pairingCommit = (pairingSource["boringssl"] as Map<*, *>)["commit"] as String
 
 android {
     namespace = "app.lantern.tv"
     compileSdk = 35
+    ndkVersion = "26.3.11579264"
     defaultConfig {
         applicationId = "app.lantern.tv"
         minSdk = 24
@@ -18,6 +21,10 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        ndk { abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86_64") }
+        externalNativeBuild {
+            cmake { arguments += "-DBORINGSSL_SOURCE=${rootProject.file("../.tools/boringssl-source/boringssl-$pairingCommit").absolutePath.replace('\\', '/')}" }
+        }
     }
     signingConfigs {
         if (hasReleaseSigning) create("managedRelease") {
@@ -38,6 +45,13 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
+    externalNativeBuild { cmake { path = file("../../native/pairing/CMakeLists.txt"); version = "3.22.1" } }
+    sourceSets.getByName("test").java.srcDir("src/sharedTest/java")
+    sourceSets.getByName("androidTest").java.srcDir("src/sharedTest/java")
+}
+
+tasks.withType<Test>().configureEach {
+    systemProperty("java.library.path", rootProject.file("../.tools/pairing").absolutePath)
 }
 
 tasks.matching { it.name == "preReleaseBuild" }.configureEach {

@@ -1,10 +1,20 @@
-# Lantern receiver protocol v2
+# Lantern receiver protocol v3
 
-The TV advertises `_lantern._tcp.local.` on TCP port 8765. TXT fields are `fn` (friendly name) and `version=2`. Discovery is a hint, not proof of identity. Windows discovers that service or connects to a user-entered private IPv4 address. Cast devices use their separate `_googlecast._tcp.local.` service and Cast protocol.
+The TV advertises `_lantern._tcp.local.` on TCP port 8765. TXT fields are `fn` (friendly name) and `version=3`. Discovery is a hint, not proof of identity. Windows discovers that service or connects to a private IPv4 address. Cast devices use their separate discovery and compatibility transport.
 
-The TV serves TLS 1.2 or newer with a persistent AndroidKeyStore identity. Windows first retrieves the certificate without sending application data. For a new or changed identity, the user must compare the entire SHA-256 fingerprint shown on the TV. Windows then opens a certificate-pinned WebSocket at `wss://TV_IP:8765/control`; this handshake checks the same pin again before sending the PIN. Saved pins are updated only after successful pairing. No plaintext downgrade is supported.
+The TV serves TLS 1.2 or newer with a persistent AndroidKeyStore identity. Windows retrieves its certificate without sending credentials, then pins that exact certificate on the WebSocket. On first use, TLS is authenticated by the subsequent channel-bound SPAKE2+ exchange. No PIN or password-derived verifier is transmitted. Normal setup asks only for the six-digit TV code; fingerprints live in advanced connection details.
 
-The first text message, within 15 seconds, is `{"type":"pair","version":2,"pin":"123456","name":"Windows PC","mediaPort":12345,"mediaFingerprint":"FULL_64_HEX_SHA256"}`. The TV accepts its current six-digit screen PIN, expires the code after five minutes, and permits five failed attempts per peer per minute. A successful pairing replaces the previous sender connection. The response is `{"type":"pair.ok","version":2,"audioMimes":["audio/mp4a-latm"]}`. Other outcomes return an `error` message and close the socket. The TV pins media to the TCP peer address, media port, and certificate fingerprint supplied over this authenticated TLS channel.
+Windows sends `pair.start` with `version=3`, `mode=code` or `resume`, a random 16-byte `clientId`, a fresh 32-byte `clientNonce`, `name`, `mediaPort`, and `mediaFingerprint`. The TV returns `pair.challenge` with a fresh 32-byte `nonce`. All binary fields use exact-length lowercase hexadecimal.
+
+For code pairing, both sides call the checksum-pinned BoringSSL RFC 9383 P-256/SHA-256 implementation. Prover/verifier identities are `lantern-windows-v3` and `lantern-tv-v3`; upstream `Register` derives registration values locally from the code. Windows sends `pair.prove` with its 65-byte share. The TV returns `pair.proof` with its share and 32-byte verifier confirmation. Windows verifies it and sends `pair.confirm` with the prover confirmation. The TV checks this before saving any credentials or granting control. Codes expire after five minutes; a code expiring mid-exchange is rejected.
+
+The SPAKE2+ context is a concatenation of unsigned two-byte big-endian length-prefixed fields, in this order: ASCII `Lantern Pairing v3 SPAKE2+-P256-SHA256`, TV certificate SHA-256 (32 bytes), media certificate SHA-256 (32 bytes), media port (two-byte big-endian), client ID (16 bytes), client nonce (32 bytes), TV nonce (32 bytes), and UTF-8 computer name (1–128 bytes). Each side uses its own observed TV identity. A relay between different TLS identities cannot complete the exchange.
+
+After mutual confirmation, the reconnect key is `HMAC-SHA256(shared_secret, ASCII("Lantern v3 remembered key") || SHA256(context))`. Windows encrypts it with DPAPI; the TV encrypts paired-client records with an AndroidKeyStore AES-GCM key. Each side stores at most 32 devices. For resume, Windows sends `pair.resume` with `HMAC-SHA256(reconnect_key, ASCII("Lantern v3 client resume") || SHA256(context))`; the TV rechecks that the client is still registered. Fresh nonces and the current media identity/port bind every reconnect.
+
+In both modes, success returns `pair.ok` with `version=3`, `audioMimes`, and `proof = HMAC-SHA256(reconnect_key, ASCII("Lantern v3 server accepted") || SHA256(context))`. Windows verifies this before persisting trust. A successful pairing replaces the previous sender. Unknown/revoked clients receive `PAIRING_REQUIRED`, leading to the same six-digit-code prompt. A changed TV certificate also requires this code-only re-pairing, with no old credential sent to it. There is no v2/PIN-message fallback.
+
+An authenticated `pair.forget` removes the active computer's credential and closes its session. Either app also provides local pairing management. The TV pins media to the authenticated TCP peer address, port, and certificate; redirects remain disabled.
 
 Messages after pairing:
 
@@ -19,12 +29,12 @@ item's position and paused state.
 Windows sends a WebSocket PING at a fixed 10-second interval, independent of incoming state updates. The TV answers with PONG. This keeps the receiver's 30-second inbound socket timeout from expiring while the user watches or pauses without issuing commands. The sender cancels this task on disconnect; aiohttp's automatic heartbeat additionally detects an unresponsive peer when inbound traffic stops.
 
 The receiver caps concurrent clients at eight. Unpaired WebSockets close after
-15 seconds even if they send only keepalive frames. The patched NanoWSD parser
+30 seconds even if they send only keepalive frames. The patched NanoWSD parser
 rejects frames over 1 MiB before allocating their payloads, bounds aggregate
 fragmented messages to 1 MiB/256 fragments, and bounds JSON depth to 32. Pairing
 messages are limited to 8 KiB; paired clients may send at most 30 messages per
 second. Failed-PIN tracking is time-limited and bounded to 256 peers. A receiver-wide
-limit of 25 failed PIN attempts per minute also applies, so rotating source IP
+limit of 25 code-pairing attempts per minute also applies, so rotating source IP
 addresses cannot bypass the five-attempt per-peer limit. A lockout clears after
 the one-minute window; it does not change the displayed PIN.
 

@@ -8,8 +8,10 @@ requirements. To preserve an existing TV installation, build
 then run `adb shell am instrument -w app.lantern.tv.test/androidx.test.runner.AndroidJUnitRunner`.
 Remove only `app.lantern.tv.test` afterward. Gradle `connectedDebugAndroidTest`
 can uninstall its target application at teardown; reserve it for disposable devices.
-The corrected identity uses a fresh keystore alias; receivers with the earlier
-incompatible key show a new fingerprint once, which must be verified again.
+Protocol v3 also exercises the same native SPAKE2+ library on both platforms.
+The native Windows build checks RFC 9383 Appendix C's known-answer values.
+Pairing integration tests cover code-only setup, remembered reconnects, two-TLS
+identity relays, wrong codes, expiry, revocation, and replay rejection.
 
 Run the Python suite with `./.venv/Scripts/python.exe -m pytest -q`.
 The receiver keepalive regression models an inbound-only timeout while the TV
@@ -19,13 +21,12 @@ connection alive and that their task is cancelled on disconnect.
 The optional `--check-receiver CONFIG_JSON` development entry point exercises
 the installed executable, including its actual LAN media server and firewall
 identity. Use a compatible local video at least five minutes long, open Lantern
-on the TV, compare its complete SHA-256 identity, and create a local configuration containing that fingerprint and its current pairing code:
+on the TV, and create a local configuration containing its current pairing code:
 
 ```json
 {
   "host": "192.168.1.10",
   "pin": "CURRENT_SIX_DIGIT_CODE",
-  "fingerprint": "FULL_64_HEX_SHA256_VERIFIED_ON_TV",
   "video": "C:/Videos/example.mkv",
   "report": "C:/path/to/project/artifacts/receiver-wifi-stability.json",
   "playSeconds": 180,

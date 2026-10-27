@@ -10,13 +10,14 @@ $env:TMP = $env:TEMP
 if ($LASTEXITCODE) { throw 'Restore the tested dependency versions with scripts/bootstrap.ps1 before packaging.' }
 & '.\.venv\Scripts\python.exe' scripts/check_tools.py
 if ($LASTEXITCODE) { throw 'Restore verified media tools before packaging.' }
+& (Join-Path $PSScriptRoot 'build-pairing.ps1')
 & '.\.venv\Scripts\python.exe' scripts/generate_windows_icon.py
 if ($LASTEXITCODE) { throw 'Windows icon generation failed.' }
 $buildPath = $env:PATH
 try {
     # Keep unrelated native tools on the developer's PATH out of the frozen DLL set.
     $env:PATH = "$projectRoot\.venv\Scripts;$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\Wbem"
-    & '.\.venv\Scripts\python.exe' -m PyInstaller --noconfirm --clean --windowed --name Lantern --icon assets/lantern-windows.ico --paths src --add-data '.tools/ffmpeg;tools' --recursive-copy-metadata lantern-tv --collect-all faster_whisper --collect-all ctranslate2 --collect-all onnxruntime --collect-all av --collect-all tokenizers --exclude-module pytest scripts/desktop_entry.py
+    & '.\.venv\Scripts\python.exe' -m PyInstaller --noconfirm --clean --windowed --name Lantern --icon assets/lantern-windows.ico --paths src --add-data '.tools/ffmpeg;tools' --add-binary '.tools/pairing/lantern_pake.dll;pairing' --add-data '.tools/pairing/BORINGSSL-LICENSE.txt;pairing' --recursive-copy-metadata lantern-tv --collect-all faster_whisper --collect-all ctranslate2 --collect-all onnxruntime --collect-all av --collect-all tokenizers --exclude-module pytest scripts/desktop_entry.py
 } finally { $env:PATH = $buildPath }
 if ($LASTEXITCODE) { throw 'Windows packaging failed.' }
 if ($Release) { Set-LanternReleaseSignature (Join-Path $projectRoot 'dist/Lantern/Lantern.exe') }

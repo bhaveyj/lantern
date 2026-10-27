@@ -9,14 +9,10 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .controller import Controller, Device, validate_host
-from .security import fingerprint
 
 
 def check_receiver(config_path: Path, data_directory: Path) -> None:
     config = json.loads(config_path.read_text(encoding="utf-8-sig"))
-    if not config.get("fingerprint"):
-        raise ValueError("Verify the full TV identity on its screen and include fingerprint in the diagnostic configuration.")
-    trusted_identity = fingerprint(config["fingerprint"])
     output = Path(config["report"])
     logging.basicConfig(filename=data_directory / "diagnostics.log", level=logging.INFO)
 
@@ -84,7 +80,9 @@ def check_receiver(config_path: Path, data_directory: Path) -> None:
             video = Path(config["video"])
             await controller.sync([{"id": "stability-check", "title": video.stem, "path": str(video), "subtitles": [], "selected_subtitle": None}])
             host = validate_host(config["host"])
-            await controller.connect(asdict(Device("stability-tv", "TV", host, int(config.get("port", 8765)), "receiver")), config["pin"], trusted_identity)
+            await controller.connect(asdict(Device("stability-tv", "TV", host, int(config.get("port", 8765)), "receiver")), config.get("pin", ""))
+            if controller.ws is None:
+                raise ValueError("Pair this TV once by supplying its six-digit code in the diagnostic configuration.")
             monitoring = True
             await controller.play("stability-check")
             await wait_for(lambda s: s.get("playing") and s.get("position", 0) >= 2, "playback startup")

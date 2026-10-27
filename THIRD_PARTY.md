@@ -8,6 +8,7 @@ Lantern-authored source is MIT licensed. External software keeps its own license
 | PySide6 / Qt | LGPL v3 / GPL v3 / commercial; dynamically loaded Qt libraries | https://code.qt.io/pyside/pyside-setup.git/ and https://code.qt.io/qt/ |
 | aiohttp | Apache 2.0 | https://github.com/aio-libs/aiohttp |
 | cryptography / OpenSSL | Apache 2.0 / BSD; bundled OpenSSL retains its notices | https://github.com/pyca/cryptography |
+| BoringSSL (SPAKE2+ pairing only) | Apache 2.0 and retained upstream notices | https://github.com/google/boringssl |
 | python-zeroconf | LGPL 2.1+ | https://github.com/python-zeroconf/python-zeroconf |
 | PyChromecast | MIT | https://github.com/home-assistant-libs/pychromecast |
 | faster-whisper / CTranslate2 | MIT | https://github.com/SYSTRAN/faster-whisper and https://github.com/OpenNMT/CTranslate2 |

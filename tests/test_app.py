@@ -14,6 +14,28 @@ from lantern.library import Library, scan_files
 from lantern.subtitle_dialog import SubtitleDialog
 
 
+async def test_connect_asks_for_code_only_when_worker_requests_it(qt_app, monkeypatch, tmp_path):
+    window = Window(tmp_path / "data", discover=False)
+    calls, prompts = [], []
+    submit = window.worker.submit
+    try:
+        await qt_wait(qt_app, lambda: window.worker.ready.is_set())
+        monkeypatch.setattr(window.worker, "submit", lambda *args: calls.append(args))
+        monkeypatch.setattr("lantern.app.QInputDialog.getText", lambda *args: (prompts.append(args) or ("123 456", True)))
+        device = {"id": "tv", "name": "TV", "host": "192.168.1.10", "port": 8765, "kind": "receiver"}
+        window.connect_to(device)
+        assert not prompts
+        assert ("connect", device, "") in calls
+        window.on_event("pairing.code_required", {"device": device, "again": False})
+        assert len(prompts) == 1
+        assert calls[-1] == ("connect", device, "123456")
+        assert "identity" not in prompts[0][2].lower()
+    finally:
+        monkeypatch.setattr(window.worker, "submit", submit)
+        window.quit()
+        await qt_wait(qt_app, lambda: window._shutdown_complete)
+
+
 @pytest.fixture(scope="module")
 def qt_app():
     return QApplication.instance() or QApplication([])

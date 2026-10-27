@@ -40,7 +40,7 @@ class TlsControlServerTest {
         val tls = SSLContext.getInstance("TLSv1.2").apply { init(managers.keyManagers, null, null) }
         val client = SSLContext.getInstance("TLSv1.2").apply { init(null, arrayOf(trusted.trustManager()), null) }
         val gate = PairingGate()
-        val server = ControlServer(gate, { _, _ -> }, {}, 0) { emptyList() }
+        val server = ControlServer(gate, { _, _ -> }, {}, 0, receiverFingerprint = pin) { emptyList() }
         server.makeSecure(tls.serverSocketFactory, arrayOf("TLSv1.2"))
         server.start(3000, false)
         try {
@@ -54,10 +54,10 @@ class TlsControlServerTest {
                 val header = StringBuilder()
                 while (!header.endsWith("\r\n\r\n")) { val byte = input.read(); check(byte >= 0); header.append(byte.toChar()) }
                 assertTrue(header.startsWith("HTTP/1.1 101"))
-                val pair = JSONObject().put("type", "pair").put("version", 2).put("pin", gate.pin).put("mediaPort", 12345).put("mediaFingerprint", pin)
-                WebSocketFrame(WebSocketFrame.OpCode.Text, true, pair.toString(), byteArrayOf(1, 2, 3, 4)).write(output)
-                output.flush()
-                assertEquals("pair.ok", JSONObject(WebSocketFrame.read(input).textPayload).getString("type"))
+                val result = PairingTestClient.pair(gate.pin, pin, { message ->
+                    WebSocketFrame(WebSocketFrame.OpCode.Text, true, message, byteArrayOf(1, 2, 3, 4)).write(output)
+                }, { JSONObject(WebSocketFrame.read(input).textPayload) }, mediaIdentity = pin)
+                assertEquals("pair.ok", result.ack.getString("type"))
                 assertEquals(trusted, server.mediaPeer)
             }
             Socket("127.0.0.1", server.listeningPort).use { socket ->

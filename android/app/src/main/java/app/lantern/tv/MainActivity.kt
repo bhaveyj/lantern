@@ -1,6 +1,7 @@
 package app.lantern.tv
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -53,6 +54,7 @@ class MainActivity : Activity() {
     private val handler = Handler(Looper.getMainLooper())
     private val gate = sessionGate
     private lateinit var identity: TlsIdentity
+    private lateinit var pairedClients: EncryptedPairedClients
     private lateinit var server: ControlServer
     private lateinit var player: ExoPlayer
     private lateinit var playerView: PlayerView
@@ -97,6 +99,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         gate.refresh()
         identity = TlsIdentity()
+        pairedClients = EncryptedPairedClients(java.io.File(filesDir, "paired-computers.bin"))
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
         // Media3 1.6.1's extracted cue samples can lose an in-progress cue
@@ -149,7 +152,7 @@ class MainActivity : Activity() {
                 setControlsVisible(false)
                 drawer?.let { root.removeView(it) }; drawer = null
             }
-        } })
+        } }, clients = pairedClients, receiverFingerprint = identity.fingerprint)
         try {
             server.makeSecure(identity.context.serverSocketFactory, arrayOf("TLSv1.2"))
             // Sender pings every 10 seconds; NanoHTTPD's default 5-second read timeout is too short.
@@ -223,14 +226,21 @@ class MainActivity : Activity() {
         codeCard.addView(text("PAIR YOUR TV", 11f, accent).apply { typeface = Typeface.DEFAULT_BOLD; letterSpacing = 0.12f })
         pinView = text(gate.pin.chunked(3).joinToString("  "), if (compact) 60f else 68f, accent).apply { typeface = Typeface.MONOSPACE; setPadding(0, dp(6), 0, dp(6)) }
         codeCard.addView(pinView)
-        codeCard.addView(text("VERIFY TV IDENTITY", 10f, TvTheme.muted))
-        codeCard.addView(text(identity.fingerprint.chunked(4).chunked(8).joinToString("\n") { it.joinToString(" ") }, 12f).apply { typeface = Typeface.MONOSPACE })
+        codeCard.addView(text("Your PC will be remembered after pairing.", 13f, TvTheme.muted))
         connectionView = text("Ready to connect to your laptop.", 14f, TvTheme.muted)
         codeCard.addView(connectionView)
         welcomeBrowse = button("Browse your playlist", primary = true) { showPlaylist() }.apply { visibility = View.GONE; textSize = 16f }
         codeCard.addView(welcomeBrowse, LinearLayout.LayoutParams(dp(260), dp(48)).apply { topMargin = dp(10) })
         pairing.addView(codeCard, LinearLayout.LayoutParams(dp(520), -2).apply { topMargin = dp(16) })
         welcome.addView(pairing, LinearLayout.LayoutParams(-1, 0, 1f))
+        val settings = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+        settings.addView(button("Paired computers") { showPairedComputers() })
+        settings.addView(button("Connection details") {
+            AlertDialog.Builder(this).setTitle("Connection details")
+                .setMessage("Encrypted connection\n\nSHA-256 TV identity:\n" + identity.fingerprint.chunked(4).chunked(8).joinToString("\n") { it.joinToString(" ") })
+                .setPositiveButton("Close", null).show()
+        })
+        welcome.addView(settings)
         welcome.addView(text("Same home network  ·  Connect by IP: ${ipAddress()}:8765", 13f, TvTheme.muted))
         root.addView(welcome, FrameLayout.LayoutParams(-1, -1))
 
@@ -447,6 +457,26 @@ class MainActivity : Activity() {
         return super.dispatchKeyEvent(event)
     }
 
+    private fun showPairedComputers() {
+        val clients = try { pairedClients.all() } catch (_: Exception) {
+            AlertDialog.Builder(this).setTitle("Reset saved pairings")
+                .setMessage("Saved pairings could not be read. Reset them and enter the TV code on your computers again.")
+                .setNegativeButton("Cancel", null).setPositiveButton("Reset") { _, _ -> pairedClients.clear(); server.disconnectSender() }.show()
+            return
+        }
+        if (clients.isEmpty()) {
+            AlertDialog.Builder(this).setTitle("Paired computers").setMessage("No computers paired yet. Enter the TV code in Lantern on your PC to connect.").setPositiveButton("Close", null).show()
+            return
+        }
+        AlertDialog.Builder(this).setTitle("Paired computers")
+            .setItems(clients.map { it.name }.toTypedArray()) { _, index ->
+                val client = clients[index]
+                AlertDialog.Builder(this).setTitle("Forget ${client.name}?")
+                    .setMessage("This computer will need the TV code to connect again.")
+                    .setNegativeButton("Cancel", null).setPositiveButton("Forget") { _, _ -> server.forgetClient(client.id) }.show()
+            }.setNegativeButton("Close", null).show()
+    }
+
     private fun advertise() {
         val wifi = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
         multicast = wifi.createMulticastLock("lantern-discovery").apply { setReferenceCounted(false); acquire() }
@@ -457,7 +487,7 @@ class MainActivity : Activity() {
             override fun onServiceUnregistered(info: NsdServiceInfo) = Unit
             override fun onUnregistrationFailed(info: NsdServiceInfo, code: Int) = Unit
         }
-        val service = NsdServiceInfo().apply { serviceName = "Lantern · ${Build.MODEL}"; serviceType = "_lantern._tcp."; port = 8765; setAttribute("fn", "${Build.MODEL} · Lantern"); setAttribute("version", "2") }
+        val service = NsdServiceInfo().apply { serviceName = "Lantern · ${Build.MODEL}"; serviceType = "_lantern._tcp."; port = 8765; setAttribute("fn", "${Build.MODEL} · Lantern"); setAttribute("version", "3") }
         nsd?.registerService(service, NsdManager.PROTOCOL_DNS_SD, registration)
     }
 

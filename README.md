@@ -22,7 +22,7 @@ If you already have the generated files, start the Windows sender with `run.ps1`
 
 1. Put the PC and TV on the same trusted home network. Avoid guest Wi-Fi, VPN-only routes, and router client isolation.
 2. Open Lantern TV on the TV and leave its pairing screen visible.
-3. Open Lantern on Windows. Select the discovered Lantern receiver, click **Connect**, and enter the six-digit code shown on the TV. On first pairing, compare the complete **VERIFY TV IDENTITY** fingerprint with the TV before approving. A changed identity requires verification again.
+3. Open Lantern on Windows. Select the discovered receiver, click **Connect**, and enter its six-digit code once. Lantern verifies and remembers the TV automatically. Later connections need only **Connect**. After a reset or reinstall, enter the new TV code to pair again.
 4. Add media on Windows and choose **Play on TV**. The playlist can be reordered from Windows or from the TV remote.
 5. For Google Cast, select the separate **Google Cast** device. Cast does not use the Lantern PIN or custom receiver.
 
@@ -35,11 +35,13 @@ The checked-in build scripts target Windows PowerShell:
 - Windows 10/11 x64 for the sender and packaging scripts.
 - Python 3.12 or newer available as `python` on `PATH`.
 - JDK 17 or newer for the Android build.
+- Visual Studio C++ build tools (2022, or an existing 2019 standalone toolchain) and CMake 3.22+ for the shared pairing library.
 - Android SDK with platform 35 and platform-tools/ADB. Set `ANDROID_HOME` when the SDK is not at `%LOCALAPPDATA%\Android\Sdk`.
+- Android NDK 26.3.11579264 and SDK CMake 3.22.1 for receiver native builds; accept the SDK licenses before building.
 - An Android TV/Google TV device or emulator for receiver testing. ADB authorization is required for installation.
 - Inno Setup 6 is optional and only needed for the Windows installer; the portable build and ZIP do not need it.
 
-The bootstrap script creates `.venv` and downloads project-local build tools into `.tools`: Gradle 8.10.2 and FFmpeg/ffprobe. Existing Java and Android SDK installations are reused. Internet access is required for the first bootstrap. Node and the pinned JADX tool are optional; install them with `./scripts/bootstrap.ps1 -ResearchTools` when working on the research scripts.
+The bootstrap script creates `.venv`, restores pinned Gradle/FFmpeg/BoringSSL sources, and compiles the small SPAKE2+ pairing library. Existing compiler, Java, and Android SDK installations are reused. The native build runs an RFC 9383 known-answer test. Internet access is required for first setup. Node and JADX remain optional research tools.
 
 ## Clone and set up
 
@@ -138,7 +140,7 @@ Optional checks:
 ./.venv/Scripts/python.exe scripts/check_windowed_media.py C:\media\movie.mkv .tmp\media-check.json
 
 # Exercise a physical Lantern receiver. The video should be a compatible local file.
-./.venv/Scripts/python.exe scripts/device_smoke.py TV_IP --pin 123456 --fingerprint FULL_SHA256_FROM_TV --video C:\media\sample.mp4
+./.venv/Scripts/python.exe scripts/device_smoke.py TV_IP --pin 123456 --video C:\media\sample.mp4
 
 # Exercise a Cast device instead of the custom receiver.
 ./.venv/Scripts/python.exe scripts/device_smoke.py CAST_IP --cast --video C:\media\sample.mp4
@@ -168,7 +170,9 @@ Media subprocesses accept a fixed set of file container formats and local file/p
 
 The custom receiver advertises `_lantern._tcp.local.` and listens on TCP port `8765`. The sender opens a WebSocket at `/control`, pairs with the six-digit TV PIN, and sends a fixed WebSocket PING every 10 seconds to keep the receiver alive during quiet playback. The sender's media server listens on an available TCP port and exposes only explicitly added files using random session tokens and byte-range support.
 
-The custom receiver uses TLS 1.2 or newer. Windows pins the TV's SHA-256 certificate fingerprint after the user compares it on the TV, before sending the PIN. The authenticated pairing sends the Windows media server's certificate fingerprint, and the TV accepts HTTPS media only from that pinned sender. There is no automatic plaintext fallback; both apps must support protocol v2. The TV key lives in AndroidKeyStore; Windows encrypts its media key and protects its password with the current user's DPAPI identity. Clearing app data removes these identities.
+The custom receiver uses TLS 1.2 or newer and code-only SPAKE2+ pairing. The code is never sent to the other device: both sides prove knowledge using the pinned BoringSSL implementation of RFC 9383. The exchange binds both TLS certificate identities, the media port, the computer name, and fresh nonces. Windows remembers the verified TV automatically. Certificate fingerprints are available only in connection details; normal pairing does not ask users to compare them. Both apps must support protocol v3; earlier fingerprint-only pairings need one new code entry.
+
+Remembered-device keys are protected by Windows DPAPI and AndroidKeyStore-backed AES-GCM storage on the TV. Reconnects use fresh, channel-bound proofs and need no code. Use the Windows connection menu's **Paired TVs** list to forget a TV, or **Paired computers** on the TV to revoke a computer. Each side retains at most 32 pairings. Clearing app data removes its remembered devices. The TV accepts HTTPS media only from the authenticated sender's address, port, and certificate.
 
 Google Cast's default receiver requires a separate HTTP compatibility path. Windows warns before connecting, and Cast should be used only on a trusted LAN. Do not publish session URLs or enable router port forwarding. The media listener binds loopback while idle and the selected network interface while connected, accepts requests only from the selected TV's address, and rejects foreign Host and browser Origin headers. Cast CORS is limited to known receiver origins on that peer. The TV accepts only tokenized media/subtitle routes on the paired sender and refuses redirects. The protocol and message formats are documented in [`docs/protocol.md`](docs/protocol.md).
 
@@ -179,7 +183,7 @@ src/lantern/              Windows sender, controller, media server, library
 android/app/src/          Android TV receiver and pairing/control server
 tests/                    Python unit and integration tests
 scripts/                  Bootstrap, build, firewall, smoke-test, and tooling scripts
-docs/protocol.md          Receiver protocol v2
+docs/protocol.md          Receiver protocol v3
 docs/testing.md           Physical-device stability test procedure
 pyproject.toml            Python package metadata and dependency ranges
 requirements-lock.txt     Tested Python dependency resolution

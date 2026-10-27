@@ -5,6 +5,8 @@ if ($Release) {
         if (-not [Environment]::GetEnvironmentVariable($name)) { throw "Release signing requires $name. Keep signing credentials outside Git." }
     }
 }
+& (Join-Path $PSScriptRoot '../.venv/Scripts/python.exe') (Join-Path $PSScriptRoot 'restore_pairing.py')
+if ($LASTEXITCODE) { throw 'Pinned pairing source restoration failed.' }
 $projectRoot = Split-Path $PSScriptRoot -Parent
 Set-Location $projectRoot
 $sdkDirectory = if ($env:ANDROID_HOME) { $env:ANDROID_HOME } else { Join-Path $env:LOCALAPPDATA 'Android\Sdk' }

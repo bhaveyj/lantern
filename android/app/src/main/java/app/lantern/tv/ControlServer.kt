@@ -15,8 +15,10 @@ class ControlServer(
     private val dispatch: (JSONObject, () -> Boolean) -> Unit,
     private val connected: (String?) -> Unit,
     port: Int = 8765,
-    private val pairingTimeoutMs: Long = 15000,
+    private val pairingTimeoutMs: Long = 30000,
     maxClients: Int = 8,
+    private val clients: PairedClientStore = MemoryPairedClients(),
+    private val receiverFingerprint: String = "a".repeat(64),
     private val audioMimes: () -> List<String> = {
         MediaCodecList(MediaCodecList.ALL_CODECS).codecInfos.filter { !it.isEncoder }
             .flatMap { it.supportedTypes.toList() }.filter { it.startsWith("audio/") }.distinct()
@@ -49,10 +51,17 @@ class ControlServer(
         deadlines.shutdownNow()
     }
 
+    fun forgetClient(id: String) {
+        clients.remove(id)
+        val previous = owner
+        if (previous?.clientId == id) previous.expire()
+    }
+    fun disconnectSender() { owner?.expire() }
+
     override fun openWebSocket(handshake: NanoHTTPD.IHTTPSession): WebSocket = Peer(handshake)
 
     override fun serveHttp(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response =
-        NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.OK, "application/json", "{\"name\":\"Lantern TV\",\"version\":2}")
+        NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.OK, "application/json", "{\"name\":\"Lantern TV\",\"version\":3}")
 
     private inner class Peer(private val handshake: NanoHTTPD.IHTTPSession) : WebSocket(handshake) {
         @Volatile private var paired = false
@@ -60,6 +69,9 @@ class ControlServer(
         private var deadline: ScheduledFuture<*>? = null
         private var intervalStarted = System.nanoTime()
         private var messages = 0
+        private val pairing = PairingSession(gate, clients, receiverFingerprint, handshake.remoteIpAddress)
+        var clientId: String? = null
+            private set
         private val outbound = OutboundMessages({ payload -> if (paired && isOpen) send(payload) }, { expire() })
 
         override fun onOpen() {
@@ -74,6 +86,7 @@ class ControlServer(
             deadline?.cancel(false)
             outbound.close()
             try { handshake.inputStream.close() } catch (_: IOException) { }
+            pairing.close()
         }
 
         override fun onMessage(frame: WebSocketFrame) {
@@ -88,17 +101,13 @@ class ControlServer(
                 ControlLimits.json(frame.textPayload, if (paired) 1024 * 1024 else 8192)
                 val message = JSONObject(frame.textPayload)
                 if (!paired) {
-                    ControlLimits.text(message.optString("name", "Windows PC"), 128)
-                    val accepted = System.nanoTime() - opened < TimeUnit.MILLISECONDS.toNanos(pairingTimeoutMs) &&
-                        message.optString("type") == "pair" && message.optInt("version") == 2 &&
-                        gate.accept(handshake.remoteIpAddress, message.optString("pin"))
-                    if (!accepted) {
-                        send(JSONObject().put("type", "error").put("message", "Code incorrect or expired. Read the code on the TV and try again.").toString())
-                        close(WebSocketFrame.CloseCode.PolicyViolation, "Pairing rejected", false)
-                        return
-                    }
-                    val trustedMedia = MediaPeer.fromPair(handshake.remoteIpAddress, message)
-                    send(JSONObject().put("type", "pair.ok").put("version", 2).put("audioMimes", JSONArray(audioMimes())).toString())
+                    require(System.nanoTime() - opened < TimeUnit.MILLISECONDS.toNanos(pairingTimeoutMs)) { "Pairing timed out. Try again" }
+                    val response = pairing.receive(message)
+                    if (response.optString("type") != "pair.ok") { send(response.toString()); return }
+                    val trustedMedia = pairing.media
+                    val acceptedClient = requireNotNull(pairing.client)
+                    clientId = acceptedClient.id
+                    send(response.put("audioMimes", JSONArray(audioMimes())).toString())
                     // Publish the acknowledgement before the ticker can send
                     // playback state to this peer during the pairing handshake.
                     paired = true
@@ -110,22 +119,36 @@ class ControlServer(
                         old
                     }
                     previous?.expire()
-                    connected(message.optString("name", "Windows PC"))
+                    connected(acceptedClient.name)
                     return
                 }
                 if (owner !== this) return
+                if (message.optString("type") == "pair.forget") {
+                    clients.remove(requireNotNull(clientId))
+                    send(JSONObject().put("type", "pair.forgotten").put("version", 3).toString())
+                    expire()
+                    return
+                }
                 ControlMessages.validate(message, requireNotNull(mediaPeer))
                 dispatch(message) { owner === this && isOpen }
-            } catch (_: Exception) {
+            } catch (error: Exception) {
                 if (paired && owner === this && isOpen) {
                     publish(JSONObject().put("type", "error").put("code", "INVALID_COMMAND").put("message", "The TV rejected an invalid playback command.").toString(), false)
                 } else {
+                    val code = when (error) {
+                        is PairingSession.PairingRequired -> "PAIRING_REQUIRED"
+                        is PairingSession.RateLimited -> "RATE_LIMITED"
+                        is PairingSession.CodeExpired -> "CODE_EXPIRED"
+                        else -> "PAIRING_REJECTED"
+                    }
+                    try { send(JSONObject().put("type", "error").put("version", 3).put("code", code).put("message", "Pairing could not complete").toString()) } catch (_: Exception) { }
                     try { close(WebSocketFrame.CloseCode.InvalidFramePayloadData, "Invalid control message", false) } catch (_: Exception) { }
                 }
             }
         }
 
         override fun onClose(code: WebSocketFrame.CloseCode?, reason: String?, initiatedByRemote: Boolean) {
+            pairing.close()
             deadline?.cancel(false)
             outbound.close()
             val wasOwner = synchronized(this@ControlServer) {

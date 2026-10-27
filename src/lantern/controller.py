@@ -18,7 +18,8 @@ from zeroconf import ServiceBrowser, ServiceListener, Zeroconf
 
 from .media import Preparation, playback_plan, probe
 from .server import MediaServer
-from .security import LocalIdentity, ReceiverTrust, receiver_fingerprint, fingerprint
+from .security import LocalIdentity, receiver_fingerprint
+from .pairing import PairedReceivers, PairingRequired, authenticate
 
 RECEIVER_PING_INTERVAL = 10.0
 CAST_LOAD_TIMEOUT = 15.0
@@ -130,8 +131,8 @@ class Controller:
         self._subtitle_revisions: dict[str, int] = {}
         self._probe_cache = OrderedDict()
         self.identity = None
-        self.receiver_trust = ReceiverTrust(cache.parent / "security" / "receivers.json")
-        self._pending_trust = None
+        self.pairings = PairedReceivers(cache.parent / "security" / "paired-receivers.bin")
+        self.receiver_identity = None
 
     async def cast_call(self, function, *args, **kwargs):
         task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
@@ -207,21 +208,39 @@ class Controller:
         host = local_address(self.device.host)
         return [{"id": m["id"], "title": m["title"], "url": self.server.url(host, m["id"]), "selectedSubtitle": m.get("selected_subtitle"), "subtitleRevision": self._subtitle_revisions.get(m["id"], 0), "subtitles": [{"id": s["id"], "label": s["label"], "url": self.server.subtitle_url(host, s["id"])} for s in m["subtitles"]]} for m in self.playlist]
 
-    async def connect(self, device: dict, pin: str = "", trusted_fingerprint: str = ""):
+    async def connect(self, device: dict, pin: str = ""):
         await self.cancel_playback()
         async with self._operation_lock:
-            await self._connect(device, pin, trusted_fingerprint)
+            await self._connect(device, pin)
 
-    async def trust_receiver(self, value: str, approved: bool):
-        pending, self._pending_trust = self._pending_trust, None
-        if pending is None or value != pending[2]:
-            raise ValueError("This receiver verification request has expired.")
-        if approved:
-            await self.connect(pending[0], pending[1], value)
-        else:
-            await self.disconnect()
+    async def paired_devices(self):
+        records = await asyncio.to_thread(self.pairings.read)
+        self.emit("paired.devices", {"items": [{"identity": identity, "name": value["name"]} for identity, value in records.items()]})
 
-    async def _connect(self, device: dict, pin: str, trusted_fingerprint: str = ""):
+    async def forget_pairing(self, identity: str):
+        async with self._operation_lock:
+            await asyncio.to_thread(self.pairings.forget, identity)
+            if identity == self.receiver_identity:
+                try:
+                    await self.send({"type": "pair.forget"})
+                finally:
+                    await self._disconnect()
+        self.emit("notice", {"message": "Pairing forgotten. Enter the TV code next time you connect."})
+
+    async def connection_details(self):
+        self.emit("connection.details", {"identity": self.receiver_identity, "name": self.device.name if self.device else "", "secure": self.ws is not None and not self.ws.closed})
+
+    async def reset_pairings(self):
+        await self.cancel_playback()
+        async with self._operation_lock:
+            if self.ws and not self.ws.closed:
+                try: await self.send({"type": "pair.forget"})
+                except (OSError, aiohttp.ClientError): pass
+            await self._disconnect()
+            await asyncio.to_thread(self.pairings.write, {})
+        self.emit("notice", {"message": "Saved TV pairings reset. Enter the TV code to connect again."})
+
+    async def _connect(self, device: dict, pin: str):
         await self._disconnect()
         self._session_generation += 1
         self.device = Device(**device)
@@ -231,29 +250,34 @@ class Controller:
         self.emit("status", {"message": f"Connecting to {self.device.name}…", "busy": True})
         try:
             if self.device.kind == "receiver":
-                if len(pin) != 6 or not pin.isdigit():
+                if pin and (len(pin) != 6 or not pin.isascii() or not pin.isdigit()):
                     raise ValueError("Enter the six-digit code displayed by Lantern on your TV.")
                 try:
                     observed = await receiver_fingerprint(self.device.host, self.device.port)
                 except (OSError, TimeoutError):
                     raise ValueError("A secure connection to the TV failed. Update the TV receiver; unencrypted pairing is disabled.") from None
-                known = await asyncio.to_thread(self.receiver_trust.get, self.device.host, self.device.port)
-                if observed not in (known, fingerprint(trusted_fingerprint) if trusted_fingerprint else None):
-                    self._pending_trust = (device, pin, observed)
-                    self.emit("receiver.trust_required", {"fingerprint": observed, "changed": known is not None, "name": self.device.name})
-                    self.emit("status", {"message": "Verify the TV identity before pairing", "busy": False})
+                saved = await asyncio.to_thread(self.pairings.get, observed)
+                if saved is None and not pin:
+                    records = await asyncio.to_thread(self.pairings.read)
+                    again = any(item["deviceId"] == device["id"] for item in records.values())
+                    self.emit("pairing.code_required", {"device": device, "again": again})
+                    self.emit("status", {"message": "Enter the code on your TV", "busy": False})
                     return
                 if self.identity is None:
-                    self.identity = await asyncio.to_thread(LocalIdentity, self.receiver_trust.path.parent)
+                    self.identity = await asyncio.to_thread(LocalIdentity, self.pairings.path.parent)
                 await self.server.configure(local_address(self.device.host), self.identity.context, peer=self.device.host)
                 self.ws = await self.session.ws_connect(f"https://{self.device.host}:{self.device.port}/control", ssl=aiohttp.Fingerprint(bytes.fromhex(observed)), heartbeat=20, max_msg_size=1024 * 1024)
-                await self.send({"type": "pair", "version": 2, "pin": pin, "name": socket.gethostname(), "mediaPort": self.server.port, "mediaFingerprint": self.identity.fingerprint})
-                response = await asyncio.wait_for(self.ws.receive_json(), timeout=8)
-                if response.get("type") != "pair.ok":
-                    raise ValueError(response.get("message", "Pairing was rejected by the TV."))
-                if response.get("version") != 2:
-                    raise ValueError("Update the TV receiver to use secure pairing.")
-                await asyncio.to_thread(self.receiver_trust.save, self.device.host, self.device.port, observed)
+                name = socket.gethostname().encode("utf-8")[:128].decode("utf-8", errors="ignore")
+                try:
+                    response, client_id, key = await authenticate(self.ws, observed, pin, saved, name, self.server.port, self.identity.fingerprint)
+                except PairingRequired:
+                    await asyncio.to_thread(self.pairings.forget, observed)
+                    await self._disconnect()
+                    self.emit("pairing.code_required", {"device": device, "again": True})
+                    self.emit("status", {"message": "Pair this TV again using its code", "busy": False})
+                    return
+                await asyncio.to_thread(self.pairings.save, observed, client_id, key, device)
+                self.receiver_identity = observed
                 self.audio_mimes = response.get("audioMimes", [])
                 self.reader = asyncio.create_task(self.read_receiver(self.ws))
                 self.receiver_keepalive_task = asyncio.create_task(self.keep_receiver_alive(self.ws))
@@ -629,7 +653,7 @@ class Controller:
                 finally:
                     self.cast = None
             self.device = None
-            self._pending_trust = None
+            self.receiver_identity = None
             if self.server.runner:
                 await self.server.configure("127.0.0.1")
             self.emit("disconnected", {})
