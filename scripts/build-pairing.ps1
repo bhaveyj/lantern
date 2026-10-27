@@ -9,36 +9,35 @@ $sdk = if ($env:ANDROID_HOME) { $env:ANDROID_HOME } else { Join-Path $env:LOCALA
 $cmake = Join-Path $sdk 'cmake/3.22.1/bin/cmake.exe'
 if (-not (Test-Path -LiteralPath $cmake)) {
     $available = Get-Command cmake -ErrorAction SilentlyContinue
-    if (-not $available) { throw 'Install CMake 3.22 or newer and Visual Studio 2022 C++ build tools.' }
+    if (-not $available) { throw 'Install CMake 3.22 or newer and Visual Studio C++ build tools.' }
     $cmake = $available.Source
 }
 if (-not $env:JAVA_HOME) { $env:JAVA_HOME = Split-Path (Split-Path (Get-Command java).Source -Parent) -Parent }
-$legacyTools = 'C:/Program Files (x86)/Microsoft Visual Studio/2019/BuildTools/VC/Auxiliary/Build/vcvarsall.bat'
-if (Test-Path -LiteralPath $legacyTools) {
-    # Reuse a standalone Build Tools installation even when it is no longer
-    # registered with the Visual Studio installer. Never dump its environment.
-    $nativeBuild = Join-Path $projectRoot '.tmp/pairing-windows-ninja'
-    $ninja = Join-Path (Split-Path $cmake -Parent) 'ninja.exe'
-    $batch = Join-Path $projectRoot '.tmp/pairing-windows-build.cmd'
-    @"
+. (Join-Path $PSScriptRoot 'native-toolchain.ps1')
+$msvcEnvironment = Find-MsvcBuildEnvironment
+$ninja = Join-Path (Split-Path $cmake -Parent) 'ninja.exe'
+if (-not (Test-Path -LiteralPath $ninja)) {
+    $available = Get-Command ninja -ErrorAction SilentlyContinue
+    if (-not $available) { throw 'Install Ninja or use the Android SDK CMake package, which includes it.' }
+    $ninja = $available.Source
+}
+# Ninja uses the discovered compiler environment and needs no release-specific
+# Visual Studio generator support in CMake. Keep paths quoted and the environment private.
+$nativeBuild = Join-Path $projectRoot '.tmp/pairing-windows-ninja'
+$batch = Join-Path $projectRoot '.tmp/pairing-windows-build.cmd'
+New-Item -ItemType Directory -Force (Split-Path $batch -Parent) | Out-Null
+@"
 @echo off
-call "$legacyTools" x64 >nul
+call "$msvcEnvironment" x64 >nul
 if errorlevel 1 exit /b 1
 "$cmake" -S "$projectRoot/native/pairing" -B "$nativeBuild" -G Ninja "-DCMAKE_MAKE_PROGRAM=$ninja" "-DBORINGSSL_SOURCE=$source" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
 if errorlevel 1 exit /b 1
 "$cmake" --build "$nativeBuild" --target lantern_pake lantern_pairing_test --parallel 4
 "@ | Set-Content -LiteralPath $batch
-    & $env:ComSpec /d /c $batch
-    $builtLibrary = Join-Path $nativeBuild 'lantern_pake.dll'
-    $selfTest = Join-Path $nativeBuild 'lantern_pairing_test.exe'
-} else {
-    & $cmake -S native/pairing -B .tmp/pairing-windows -G 'Visual Studio 17 2022' -A x64 "-DBORINGSSL_SOURCE=$source" -DBUILD_TESTING=OFF
-    if ($LASTEXITCODE) { throw 'Windows pairing configuration failed.' }
-    & $cmake --build .tmp/pairing-windows --config Release --target lantern_pake lantern_pairing_test --parallel 4
-    $builtLibrary = '.tmp/pairing-windows/Release/lantern_pake.dll'
-    $selfTest = '.tmp/pairing-windows/Release/lantern_pairing_test.exe'
-}
+& $env:ComSpec /d /c $batch
 if ($LASTEXITCODE) { throw 'Windows pairing build failed.' }
+$builtLibrary = Join-Path $nativeBuild 'lantern_pake.dll'
+$selfTest = Join-Path $nativeBuild 'lantern_pairing_test.exe'
 & $selfTest
 if ($LASTEXITCODE) { throw 'SPAKE2+ RFC 9383 known-answer verification failed.' }
 Write-Output 'SPAKE2+ RFC 9383 known-answer verification passed.'

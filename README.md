@@ -35,7 +35,7 @@ The checked-in build scripts target Windows PowerShell:
 - Windows 10/11 x64 for the sender and packaging scripts.
 - Python 3.12 or newer available as `python` on `PATH`.
 - JDK 17 or newer for the Android build.
-- Visual Studio C++ build tools (2022, or an existing 2019 standalone toolchain) and CMake 3.22+ for the shared pairing library.
+- Visual Studio C++ build tools with the x64 C++ workload, CMake 3.22+, and Ninja for the shared pairing library. The build discovers the installed Visual Studio version; existing standalone 2019 tools also work. The Android SDK CMake package includes Ninja.
 - Android SDK with platform 35 and platform-tools/ADB. Set `ANDROID_HOME` when the SDK is not at `%LOCALAPPDATA%\Android\Sdk`.
 - Android NDK 26.3.11579264 and SDK CMake 3.22.1 for receiver native builds; accept the SDK licenses before building.
 - An Android TV/Google TV device or emulator for receiver testing. ADB authorization is required for installation.
