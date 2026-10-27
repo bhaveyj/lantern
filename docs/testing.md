@@ -1,5 +1,16 @@
 # Receiver stability verification
 
+The Android device test `TlsIdentityDeviceTest` exercises a real AndroidKeyStore
+identity and a pinned TLS/WebSocket pairing handshake. Desktop JVM tests use a
+different security provider and cannot catch Android's prehashed ECDSA permission
+requirements. To preserve an existing TV installation, build
+`assembleDebugAndroidTest`, install the receiver and test APK with `adb install -r`,
+then run `adb shell am instrument -w app.lantern.tv.test/androidx.test.runner.AndroidJUnitRunner`.
+Remove only `app.lantern.tv.test` afterward. Gradle `connectedDebugAndroidTest`
+can uninstall its target application at teardown; reserve it for disposable devices.
+The corrected identity uses a fresh keystore alias; receivers with the earlier
+incompatible key show a new fingerprint once, which must be verified again.
+
 Run the Python suite with `./.venv/Scripts/python.exe -m pytest -q`.
 The receiver keepalive regression models an inbound-only timeout while the TV
 continuously sends state updates. It checks that fixed-schedule PINGs keep the

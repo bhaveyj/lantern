@@ -45,7 +45,7 @@ jobs:
         shell: pwsh
         run: |
           ./scripts/build-android.ps1
-          ./.tools/gradle-8.10.2/bin/gradle.bat -p android --no-daemon securityDependencyInventory
+          ./.tools/gradle-8.10.2/bin/gradle.bat -p android --no-daemon assembleDebugAndroidTest securityDependencyInventory
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Audit exact Python and Maven packages
         shell: pwsh

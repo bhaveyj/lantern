@@ -21,7 +21,9 @@ class ReceiverBoundsTest {
         server.start(3000, true)
         try {
             connect(server.listeningPort).use { socket ->
-                val output = socket.getOutputStream()
+                // Masked frames are emitted byte-by-byte by this test client;
+                // buffer writes so socket timing does not obscure the size limit.
+                val output = socket.getOutputStream().buffered()
                 NanoWSD.WebSocketFrame(NanoWSD.WebSocketFrame.OpCode.Text, false, "x".repeat(600000), byteArrayOf(1, 2, 3, 4)).write(output)
                 NanoWSD.WebSocketFrame(NanoWSD.WebSocketFrame.OpCode.Continuation, true, "x".repeat(600000), byteArrayOf(1, 2, 3, 4)).write(output)
                 output.flush()

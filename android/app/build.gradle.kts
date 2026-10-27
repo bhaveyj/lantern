@@ -45,17 +45,24 @@ tasks.matching { it.name == "preReleaseBuild" }.configureEach {
 }
 
 dependencies {
+    constraints {
+        implementation("com.google.guava:guava:33.7.2-android") {
+            because("Patch CVE-2026-102554 in the receiver and its test classpaths")
+        }
+    }
     implementation("androidx.media3:media3-exoplayer:1.6.1")
     implementation("androidx.media3:media3-ui:1.6.1")
     // The WebSocket layer is vendored with allocation/fragment limits.
     implementation("org.nanohttpd:nanohttpd:2.3.1")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("junit:junit:4.13.2")
 }
 
 tasks.register("securityDependencyInventory") {
     doLast {
-        val packages = listOf("debugRuntimeClasspath", "debugUnitTestRuntimeClasspath").flatMap { name ->
+        val packages = listOf("debugRuntimeClasspath", "debugUnitTestRuntimeClasspath", "debugAndroidTestRuntimeClasspath").flatMap { name ->
             configurations.getByName(name).resolvedConfiguration.resolvedArtifacts.map { artifact ->
                 val id = artifact.moduleVersion.id
                 mapOf("name" to "${id.group}:${id.name}", "version" to id.version)
