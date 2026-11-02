@@ -29,7 +29,7 @@ Your Windows PC sends media over your home network to your TV. Choose a connecti
 | **Lantern receiver** | Install the APK on Android TV / Google TV and pair with its six-digit code. | Encrypted playback, synchronized playlists, TV remote controls, captions, and picture-fit options. |
 | **Google Cast** | Select a compatible Cast device in Lantern. | Uses Cast's default receiver without the Lantern APK. Media uses unencrypted HTTP, so use a trusted private LAN. |
 
-Keep your PC awake and Lantern running while you watch. Closing the main window while connected keeps playback running from the system tray.
+Keep your PC awake and Lantern running while you watch. Closing the main window while connected keeps playback running from the system tray. Launch Lantern again, or click its tray icon, to bring the existing window back without interrupting playback.
 
 ## Getting started
 

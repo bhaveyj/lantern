@@ -36,11 +36,6 @@ async def test_connect_asks_for_code_only_when_worker_requests_it(qt_app, monkey
         await qt_wait(qt_app, lambda: window._shutdown_complete)
 
 
-@pytest.fixture(scope="module")
-def qt_app():
-    return QApplication.instance() or QApplication([])
-
-
 async def qt_wait(app, predicate):
     for _ in range(300):
         app.processEvents()

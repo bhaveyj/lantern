@@ -11,7 +11,7 @@ import uuid
 from dataclasses import asdict
 from pathlib import Path
 
-from PySide6.QtCore import QLockFile, QObject, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QFontDatabase, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSlider, QSpinBox, QStyle, QStyledItemDelegate, QSystemTrayIcon, QVBoxLayout, QWidget
 
@@ -20,6 +20,7 @@ from .library import Library, Subtitle, scan_files
 from .subtitle_dialog import SubtitleDialog
 from .subtitle_jobs import SubtitleJobs, inspect_media
 from .credentials import CredentialStore
+from .instance import SingleInstance
 from .theme import COLORS, apply_theme
 
 
@@ -337,7 +338,7 @@ class Window(QMainWindow):
         menu.addSeparator()
         menu.addAction("Quit", self.quit)
         self.tray.setContextMenu(menu)
-        self.tray.activated.connect(lambda reason: self.show_normal() if reason == QSystemTrayIcon.ActivationReason.DoubleClick else None)
+        self.tray.activated.connect(lambda reason: self.show_normal() if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick) else None)
         self.tray.show()
         if discover:
             QTimer.singleShot(200, self.worker.scan)
@@ -852,8 +853,14 @@ class Window(QMainWindow):
         QMessageBox.warning(self, "Lantern", message)
 
     def show_normal(self):
-        self.showNormal()
+        self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
+        self.show()
+        self.raise_()
         self.activateWindow()
+        modal = QApplication.activeModalWidget()
+        if modal and self.isAncestorOf(modal):
+            modal.raise_()
+            modal.activateWindow()
 
     def closeEvent(self, event):
         if not self.quitting and self.connected_kind and QSystemTrayIcon.isSystemTrayAvailable():
@@ -903,18 +910,28 @@ def main():
     app.setApplicationName("Lantern TV")
     app.setStyle("Fusion")
     apply_theme(app)
-    lock = QLockFile(str(args.data_dir / "lantern.lock"))
-    if not lock.tryLock(100):
-        QMessageBox.information(None, "Lantern", "Lantern is already running. Open it from the system tray.")
-        return
-    window = Window(args.data_dir, not args.no_discovery and not args.preview)
-    window.show()
-    if args.preview:
-        def capture():
-            window.grab().save(str(args.preview))
-            window.quit()
-        QTimer.singleShot(700, capture)
-    sys.exit(app.exec())
+    instance = SingleInstance(args.data_dir)
+    try:
+        if not instance.acquire():
+            if instance.activate_existing():
+                return
+            # The old instance may have finished shutting down during activation.
+            if not instance.acquire():
+                QMessageBox.warning(None, "Lantern", "Lantern could not reopen its existing window. It may still be starting or closing. Please try opening it again shortly.")
+                return
+        instance.listen()
+        window = Window(args.data_dir, not args.no_discovery and not args.preview)
+        instance.activated.connect(window.show_normal)
+        window.show()
+        if args.preview:
+            def capture():
+                window.grab().save(str(args.preview))
+                window.quit()
+            QTimer.singleShot(700, capture)
+        result = app.exec()
+    finally:
+        instance.close()
+    sys.exit(result)
 
 
 if __name__ == "__main__":
