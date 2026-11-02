@@ -29,7 +29,7 @@ Your Windows PC sends media over your home network to your TV. Choose a connecti
 | **Lantern receiver** | Install the APK on Android TV / Google TV and pair with its six-digit code. | Encrypted playback, synchronized playlists, TV remote controls, captions, and picture-fit options. |
 | **Google Cast** | Select a compatible Cast device in Lantern. | Uses Cast's default receiver without the Lantern APK. Media uses unencrypted HTTP, so use a trusted private LAN. |
 
-Keep your PC awake and Lantern running while you watch. Closing the main window while connected keeps playback running from the system tray.
+Keep your PC awake and Lantern running while you watch. Closing the main window while connected keeps playback running from the system tray. Launch Lantern again, or click its tray icon, to bring the existing window back without interrupting playback.
 
 ## Getting started
 
@@ -57,7 +57,7 @@ Generated captions can contain errors. Translation, rolling live captions, and a
 
 ## Firefox streaming preview
 
-An optional companion for sending HLS live/on-demand streams and MP4 video from Firefox to your TV is in development. Its companion and relay implementation are not yet included in the published source.
+The optional Firefox companion sends HLS live/on-demand streams and MP4 video to Lantern through the Windows app. It discovers video inside embedded players, keeps session updates on the laptop, and provides live playback controls on the TV. This is an unsigned development preview; load it as a temporary Firefox add-on and build both apps from the same checkout.
 
 [Preview setup and limitations](docs/web-streaming.md)
 
@@ -81,7 +81,7 @@ Original media is never moved or rewritten. See the [security model](docs/securi
 
 - [Build and develop](docs/development.md): prerequisites, installation, packaging, release signing, and automated tests.
 - [Media and subtitles](docs/media.md): formats, preparation, caption tools, and local storage.
-- [Firefox streaming preview](docs/web-streaming.md): planned companion setup, supported sources, and current limitations; implementation is pending publication.
+- [Firefox streaming preview](docs/web-streaming.md): companion setup, supported sources, and current limitations.
 - [Network and security](docs/security.md): pairing, encryption, Cast, and media process restrictions.
 - [Receiver protocol](docs/protocol.md) and [device testing](docs/testing.md).
 

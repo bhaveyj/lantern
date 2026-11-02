@@ -14,6 +14,12 @@ Pairing integration tests cover code-only setup, remembered reconnects, two-TLS
 identity relays, wrong codes, expiry, revocation, and replay rejection.
 
 Run the Python suite with `./.venv/Scripts/python.exe -m pytest -q`.
+The desktop activation tests launch a second process against the same data directory
+and verify that a tray-hidden or minimized window returns without resetting playback.
+They also cover startup races, maximized windows, isolated data directories, crash
+recovery, and bounded same-user local activation connections. For an installed Windows
+build, close the window while connected, then launch its shortcut again: the existing
+window should return without a second application or an "already running" dialog.
 The receiver keepalive regression models an inbound-only timeout while the TV
 continuously sends state updates. It checks that fixed-schedule PINGs keep the
 connection alive and that their task is cancelled on disconnect.

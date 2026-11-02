@@ -9,6 +9,8 @@ class ControlMessagesTest {
     @Test fun authenticatedSenderMessagesAreAccepted() {
         ControlMessages.validate(JSONObject("""{"type":"playback.load","item":{"id":"one","title":"Movie","url":"https://192.168.1.2:12345/stream/${"a".repeat(43)}/one","subtitles":[]}}"""), peer)
         ControlMessages.validate(JSONObject("""{"type":"playback.command","action":"subtitle","value":null,"revision":2}"""), peer)
+        ControlMessages.validate(JSONObject("""{"type":"playback.load","item":{"id":"web","title":"Live match","url":"https://192.168.1.2:12345/stream/${"a".repeat(43)}/web","mimeType":"application/vnd.apple.mpegurl","live":true,"seekable":true,"subtitles":[]}}"""), peer)
+        ControlMessages.validate(JSONObject("""{"type":"playback.command","action":"live"}"""), peer)
     }
 
     @Test fun malformedMessagesAreRejected() {
@@ -29,6 +31,15 @@ class ControlMessagesTest {
         for (url in listOf("https://127.0.0.1:12345/stream/${"a".repeat(43)}/one", "https://192.168.1.2:12345/private", "https://192.168.1.2:12345/stream/${"a".repeat(43)}/other", "https://192.168.1.2:12345/subtitle/${"a".repeat(43)}/one")) {
             val item = JSONObject().put("id", "one").put("title", "Movie").put("url", url)
             try { ControlMessages.validate(JSONObject().put("type", "playback.load").put("item", item), peer); fail("Untrusted route accepted") } catch (_: IllegalArgumentException) { }
+        }
+    }
+
+    @Test fun webHintsDoNotPermitForeignManifestSegmentOrKeyRoutes() {
+        for (url in listOf("https://cdn.example/segment.ts", "https://192.168.1.2:12345/stream/${"a".repeat(43)}/web?url=https://cdn.example/key", "https://192.168.1.2:12345/stream/${"a".repeat(43)}/../key")) {
+            val item = JSONObject().put("id", "web").put("title", "Live").put("url", url)
+                .put("mimeType", "application/x-mpegURL").put("live", true)
+            try { ControlMessages.validate(JSONObject().put("type", "playback.load").put("item", item), peer); fail("Untrusted web route accepted") }
+            catch (_: IllegalArgumentException) { }
         }
     }
 }
