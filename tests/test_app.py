@@ -36,11 +36,6 @@ async def test_connect_asks_for_code_only_when_worker_requests_it(qt_app, monkey
         await qt_wait(qt_app, lambda: window._shutdown_complete)
 
 
-@pytest.fixture(scope="module")
-def qt_app():
-    return QApplication.instance() or QApplication([])
-
-
 async def test_browser_video_controls_do_not_require_a_file_selection(qt_app, monkeypatch, tmp_path):
     window = Window(tmp_path / "data", discover=False)
     calls = []
