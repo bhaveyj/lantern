@@ -7,9 +7,97 @@ from aiohttp import web
 import pytest
 
 from lantern.controller import Controller, Device
-from lantern.security import LocalIdentity, ReceiverTrust, receiver_fingerprint
+from lantern.security import LocalIdentity, ReceiverConnectionError, ReceiverTrust, receiver_fingerprint
 from dataclasses import asdict
 from pairing_peer import accept
+
+
+async def test_refused_receiver_reports_tcp_service_failure(unused_tcp_port):
+    with pytest.raises(ReceiverConnectionError) as result:
+        await receiver_fingerprint("127.0.0.1", unused_tcp_port)
+    assert result.value.phase == "tcp" and result.value.reason == "refused"
+    assert "Open Lantern TV" in str(result.value)
+    assert "up to date" not in str(result.value)
+
+
+async def test_unreachable_receiver_does_not_start_tls_or_leak_socket(monkeypatch):
+    loop = asyncio.get_running_loop()
+    sockets = []
+    async def unreachable(connection, address):
+        sockets.append(connection)
+        raise OSError("network route unavailable")
+    async def unexpected_tls(**kwargs):
+        raise AssertionError("TLS must not start without a TCP connection")
+    monkeypatch.setattr(loop, "sock_connect", unreachable)
+    monkeypatch.setattr("lantern.security.asyncio.open_connection", unexpected_tls)
+    with pytest.raises(ReceiverConnectionError) as result:
+        await receiver_fingerprint("127.0.0.1", 8765)
+    assert result.value.phase == "tcp" and result.value.reason == "unreachable"
+    assert "same home network" in str(result.value)
+    assert "up to date" not in str(result.value)
+    assert sockets[0].fileno() == -1
+
+
+async def test_receiver_tcp_timeout_is_not_reported_as_tls_failure(monkeypatch):
+    async def stalled(connection, address):
+        await asyncio.Event().wait()
+    monkeypatch.setattr(asyncio.get_running_loop(), "sock_connect", stalled)
+    monkeypatch.setattr("lantern.security.RECEIVER_CONNECT_TIMEOUT", .02)
+    with pytest.raises(ReceiverConnectionError) as result:
+        await receiver_fingerprint("127.0.0.1", 8765)
+    assert result.value.phase == "tcp" and result.value.reason == "timeout"
+    assert "did not respond" in str(result.value)
+    assert "up to date" not in str(result.value)
+
+
+async def test_plaintext_peer_reports_tls_failure_without_sending_pairing_data():
+    received = []
+    finished = asyncio.Event()
+    async def plaintext(reader, writer):
+        try:
+            received.append(await reader.read(4096))
+            writer.write(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            finished.set()
+    server = await asyncio.start_server(plaintext, "127.0.0.1", 0)
+    try:
+        port = server.sockets[0].getsockname()[1]
+        with pytest.raises(ReceiverConnectionError) as result:
+            await receiver_fingerprint("127.0.0.1", port)
+        await asyncio.wait_for(finished.wait(), 2)
+        assert result.value.phase == "tls"
+        assert "accepted a connection" in str(result.value)
+        assert received[0][0] == 22  # TLS handshake record, not HTTP or JSON.
+        assert b'"pin"' not in received[0] and b'"type"' not in received[0]
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+async def test_accepted_but_stalled_receiver_reports_tls_failure(monkeypatch):
+    monkeypatch.setattr("lantern.security.RECEIVER_TLS_TIMEOUT", .05)
+    finished = asyncio.Event()
+    async def stalled(reader, writer):
+        try:
+            await reader.read()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            finished.set()
+    server = await asyncio.start_server(stalled, "127.0.0.1", 0)
+    try:
+        port = server.sockets[0].getsockname()[1]
+        with pytest.raises(ReceiverConnectionError) as result:
+            await receiver_fingerprint("127.0.0.1", port)
+        await asyncio.wait_for(finished.wait(), 2)
+        assert result.value.phase == "tls"
+        assert "encrypted connection failed" in str(result.value)
+    finally:
+        server.close()
+        await server.wait_closed()
 
 
 async def test_tls_identity_persists_and_media_uses_pinned_https(tmp_path):

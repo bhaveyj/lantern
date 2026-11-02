@@ -41,6 +41,29 @@ def qt_app():
     return QApplication.instance() or QApplication([])
 
 
+async def test_browser_video_controls_do_not_require_a_file_selection(qt_app, monkeypatch, tmp_path):
+    window = Window(tmp_path / "data", discover=False)
+    calls = []
+    submit = window.worker.submit
+    try:
+        await qt_wait(qt_app, lambda: window.worker.ready.is_set())
+        monkeypatch.setattr(window.worker, "submit", lambda *args: calls.append(args))
+        window.on_event("web.source", {"id": "web-video", "title": "Football from Firefox", "live": True, "seekable": False})
+        window.on_event("state", {"id": "web-video", "title": "Football from Firefox", "playing": True, "live": True, "seekable": False, "duration": 0})
+        assert window.now.text() == "Football from Firefox"
+        assert window.total.text() == "LIVE"
+        assert not window.seek.isEnabled()
+        assert not window.go_live.isHidden()
+        window.play_pause()
+        window.go_live.click()
+        assert calls == [("command", "pause"), ("command", "live")]
+        assert not window.library.items
+    finally:
+        monkeypatch.setattr(window.worker, "submit", submit)
+        window.quit()
+        await qt_wait(qt_app, lambda: window._shutdown_complete)
+
+
 async def qt_wait(app, predicate):
     for _ in range(300):
         app.processEvents()

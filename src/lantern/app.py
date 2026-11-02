@@ -257,7 +257,7 @@ class Playlist(QListWidget):
         empty_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         empty_icon.setFixedSize(48, 48)
         empty_layout.addWidget(empty_icon, 0, Qt.AlignmentFlag.AlignHCenter)
-        for text, name in [("A good night starts with a file.", "emptyTitle"), ("Drop video or audio here, or choose Add files.", "muted")]:
+        for text, name in [("Your next watch starts here.", "emptyTitle"), ("Add a file, or send a video from Firefox.", "muted")]:
             item = label(text, name)
             item.setAlignment(Qt.AlignmentFlag.AlignCenter)
             empty_layout.addWidget(item)
@@ -304,7 +304,7 @@ def clock_text(value):
 class Window(QMainWindow):
     def __init__(self, data: Path, discover=True):
         super().__init__()
-        self.setWindowTitle("Lantern · Local files, big screen")
+        self.setWindowTitle("Lantern · Video on your TV")
         self.setWindowIcon(icon())
         self.resize(1120, 800)
         self.setMinimumSize(960, 720)
@@ -324,6 +324,9 @@ class Window(QMainWindow):
         self.position = 0.0
         self.duration = 0.0
         self.current_id = None
+        self.web_source = {}
+        self.live = False
+        self.seekable = True
         self.quitting = False
         self.rendering = False
         self.build_ui()
@@ -366,7 +369,7 @@ class Window(QMainWindow):
         intro = QVBoxLayout()
         intro.setSpacing(5)
         intro.addWidget(label("Your library. Bigger screen.", "hero"))
-        intro.addWidget(label("Pick a file. Choose your TV. Press play.", "muted"))
+        intro.addWidget(label("Choose your TV. Play a file, or send a video from Firefox.", "muted"))
         layout.addLayout(intro)
 
         connection = QWidget()
@@ -395,6 +398,7 @@ class Window(QMainWindow):
         options_menu = QMenu(options)
         options_menu.addAction("Paired TVs…", lambda: self.worker.submit("paired_devices"))
         options_menu.addAction("Advanced connection details…", lambda: self.worker.submit("connection_details"))
+        options_menu.addAction("Firefox extension…", self.firefox_help)
         options_menu.addSeparator()
         options_menu.addAction("Reset saved pairings…", self.reset_pairings)
         options.setMenu(options_menu)
@@ -474,6 +478,10 @@ class Window(QMainWindow):
         timeline.addWidget(self.seek, 1)
         self.total = label("0:00", "muted")
         timeline.addWidget(self.total)
+        self.go_live = QPushButton("Go live")
+        self.go_live.clicked.connect(lambda: self.worker.submit("command", "live"))
+        self.go_live.hide()
+        timeline.addWidget(self.go_live)
         controls_layout.addLayout(timeline)
         transport = QHBoxLayout()
         for text, action, value in [("Previous", "previous", None), ("−30s", "relative", -30)]:
@@ -534,6 +542,9 @@ class Window(QMainWindow):
     def choose_files(self):
         files, _ = QFileDialog.getOpenFileNames(self, "Add video or audio", "", "Media (*.mp4 *.m4v *.mov *.mkv *.webm *.avi *.mpeg *.mpg *.ts *.m2ts *.mp3 *.m4a *.aac *.flac *.wav *.ogg)")
         self.add_files(files)
+
+    def firefox_help(self):
+        QMessageBox.information(self, "Watch from Firefox", "Connect to your TV here, then open the Lantern TV extension in Firefox while a video is playing. Choose the main video and click Play on TV.\n\nKeep Lantern running and the Firefox tab open. Stop playback here or in the extension to end the session.\n\nFor this development build, extension setup is described in docs/web-streaming.md in the project folder.")
 
     def add_files(self, files):
         if files:
@@ -667,7 +678,7 @@ class Window(QMainWindow):
             self.worker.submit("play", self.selected_id())
 
     def play_pause(self):
-        if self.current_id and self.current_id == self.selected_id() and not self.finished:
+        if self.current_id and (self.current_id == self.selected_id() or self.current_id == self.web_source.get("id")) and not self.finished:
             self.worker.submit("command", "pause" if self.playing else "play")
         else:
             self.play_selected()
@@ -676,7 +687,8 @@ class Window(QMainWindow):
         if action == "stop":
             self.worker.submit("stop")
         elif action == "relative":
-            self.worker.submit("command", "seek", max(0, self.position + value))
+            if self.seekable:
+                self.worker.submit("command", "seek", max(0, self.position + value))
         else:
             self.worker.submit("command", action, value)
 
@@ -761,7 +773,12 @@ class Window(QMainWindow):
                 self.subtitle_activity.hide()
             self.sleep_hold()
             return
-        if event == "library.imported":
+        if event == "web.source":
+            self.web_source = data
+            if data:
+                self.now.setText(data["title"])
+                self.status.setText("Video from Firefox · keep Lantern running and the tab open")
+        elif event == "library.imported":
             try:
                 added = self.library.add_scanned(data["items"])
                 self.status.setText(f"Added {len(added)} file{'s' if len(added) != 1 else ''}")
@@ -814,6 +831,10 @@ class Window(QMainWindow):
             self.finished = data.get("playerState") == "IDLE" and data.get("idleReason") == "FINISHED"
             self.position = data.get("position", 0)
             self.duration = data.get("duration", 0)
+            self.live = data.get("live", False)
+            self.seekable = data.get("seekable", not self.live)
+            self.seek.setEnabled(self.seekable and self.duration > 0)
+            self.go_live.setVisible(self.live)
             self.play_button.setText("Pause" if self.playing else "Play again" if self.finished else "Resume" if self.current_id else "Play on TV")
             media = next((m for m in self.library.items if m.id == self.current_id), None)
             if media and "subtitleId" in data and media.selected_subtitle != data["subtitleId"]:
@@ -821,8 +842,9 @@ class Window(QMainWindow):
                 self.library.save()
                 if self.selected_id() == media.id:
                     self.selection_changed()
-            self.now.setText(media.title if media else "Nothing playing yet")
-            self.now.setToolTip(media.title if media else "")
+            title = media.title if media else data.get("title", self.web_source.get("title", "")) if self.current_id else ""
+            self.now.setText(title or "Nothing playing yet")
+            self.now.setToolTip(title)
             self.update_time()
         elif event == "error":
             self.busy = False
@@ -834,12 +856,12 @@ class Window(QMainWindow):
 
     def tick(self):
         if self.playing and not self.seek.isSliderDown():
-            self.position = min(self.duration, self.position + 1)
+            self.position = min(self.duration, self.position + 1) if self.duration > 0 else self.position + 1
             self.update_time()
 
     def update_time(self):
         self.elapsed.setText(clock_text(self.position))
-        self.total.setText(clock_text(self.duration))
+        self.total.setText("LIVE" if self.live else clock_text(self.duration))
         if not self.seek.isSliderDown():
             self.seek.setValue(int(self.position * 1000 / self.duration) if self.duration else 0)
 

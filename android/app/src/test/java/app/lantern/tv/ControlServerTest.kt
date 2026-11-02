@@ -41,6 +41,8 @@ class ControlServerTest {
             Peer(server.listeningPort).use { peer ->
                 val pairing = PairingTestClient.pair(gate.pin, "a".repeat(64), peer::send, peer::receive)
                 assertEquals("pair.ok", pairing.ack.optString("type"))
+                assertEquals(1, pairing.ack.getInt("webStreamVersion"))
+                assertEquals("audio/mp4a-latm", pairing.ack.getJSONArray("audioMimes").getString(0))
                 peer.send("""{"type":"playback.command","action":"seek","value":"invalid"}""")
                 assertEquals("INVALID_COMMAND", peer.receive().optString("code"))
                 assertEquals(1L, applied.count)

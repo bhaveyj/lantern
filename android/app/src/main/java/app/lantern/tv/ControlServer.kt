@@ -107,7 +107,7 @@ class ControlServer(
                     val trustedMedia = pairing.media
                     val acceptedClient = requireNotNull(pairing.client)
                     clientId = acceptedClient.id
-                    send(response.put("audioMimes", JSONArray(audioMimes())).toString())
+                    send(response.put("audioMimes", JSONArray(audioMimes())).put("webStreamVersion", 1).toString())
                     // Publish the acknowledgement before the ticker can send
                     // playback state to this peer during the pairing handshake.
                     paired = true
