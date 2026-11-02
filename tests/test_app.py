@@ -13,6 +13,8 @@ from lantern.app import Window, Worker
 from lantern.library import Library, scan_files
 from lantern.subtitle_dialog import SubtitleDialog
 
+LONG_NAME = "Spider-Man.Brand.New.Day.2026.IMAX.2160p.CORE.WEB-DL.DDP5.1.Atmos.HDR.H.265-NotSoNewDayForSony.mkv"
+
 
 async def test_connect_asks_for_code_only_when_worker_requests_it(qt_app, monkeypatch, tmp_path):
     window = Window(tmp_path / "data", discover=False)
@@ -55,6 +57,74 @@ async def test_browser_video_controls_do_not_require_a_file_selection(qt_app, mo
         assert not window.library.items
     finally:
         monkeypatch.setattr(window.worker, "submit", submit)
+        window.quit()
+        await qt_wait(qt_app, lambda: window._shutdown_complete)
+
+
+async def test_readable_names_preserve_files_records_selection_and_full_details(qt_app, tmp_path):
+    first = tmp_path / LONG_NAME
+    first.write_bytes(b"original media content")
+    second = tmp_path / "Second.2026.1080p.WEB-DL.mkv"
+    second.touch()
+    window = Window(tmp_path / "data", discover=False)
+    try:
+        media = window.library.add([str(first), str(second)])
+        window.refresh_library()
+        assert window.feature_title.text() == "Spider-Man Brand New Day"
+        assert window.original_filename.toPlainText() == LONG_NAME
+        assert "2160p" in window.queue.item(0).text()
+        window.queue.item(1).setSelected(True)
+        before = {item.data(256) for item in window.queue.selectedItems()}
+        window.original_names.setChecked(True)
+        assert LONG_NAME in window.queue.item(0).text()
+        assert {item.data(256) for item in window.queue.selectedItems()} == before
+        assert window.selected_id() == media[0].id
+        assert media[0].title == first.stem
+        assert media[0].path == str(first.resolve())
+        assert first.read_bytes() == b"original media content"
+        assert window.original_filename.toPlainText() == LONG_NAME
+    finally:
+        window.quit()
+        await qt_wait(qt_app, lambda: window._shutdown_complete)
+
+
+async def test_feature_play_targets_selected_file_while_browser_controls_still_work(qt_app, monkeypatch, tmp_path):
+    source = tmp_path / LONG_NAME
+    source.touch()
+    window = Window(tmp_path / "data", discover=False)
+    submit = window.worker.submit
+    calls = []
+    try:
+        await qt_wait(qt_app, lambda: window.worker.ready.is_set())
+        media = window.library.add([str(source)])[0]
+        window.refresh_library()
+        monkeypatch.setattr(window.worker, "submit", lambda *args: calls.append(args))
+        window.on_event("web.source", {"id": "browser", "title": "Browser video"})
+        window.on_event("state", {"id": "browser", "playing": True, "title": "Browser video"})
+        window.feature_action.click()
+        window.play_button.click()
+        assert calls == [("play", media.id), ("command", "pause")]
+        assert window.now.text() == "Browser video"
+        assert window.feature_heading.text() == "SELECTED MEDIA"
+    finally:
+        monkeypatch.setattr(window.worker, "submit", submit)
+        window.quit()
+        await qt_wait(qt_app, lambda: window._shutdown_complete)
+
+
+async def test_connection_header_does_not_claim_cast_is_encrypted(qt_app, tmp_path):
+    window = Window(tmp_path / "data", discover=False)
+    try:
+        window.on_event("connected", {"kind": "cast", "name": "Living room"})
+        assert window.connection_panel.isHidden()
+        assert "securely" not in window.device_button.toolTip()
+        assert not window.fit.isEnabled()
+        window.on_event("connected", {"kind": "receiver", "name": "Living room"})
+        assert "securely" in window.device_button.toolTip()
+        assert window.fit.isEnabled()
+        window.device_button.click()
+        assert not window.connection_panel.isHidden()
+    finally:
         window.quit()
         await qt_wait(qt_app, lambda: window._shutdown_complete)
 
