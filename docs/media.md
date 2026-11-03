@@ -2,6 +2,12 @@
 
 [Back to Lantern TV](../README.md)
 
+## Desktop playlist and filenames
+
+Use **Choose your TV** in the header to select, connect, or manage a receiver. Connection settings open above the workspace; playback controls stay in the bottom dock.
+
+The playlist shows readable display titles when a filename contains recognizable release markers, with resolution and audio/picture details underneath. Ambiguous names and custom library titles are preserved. The **Original filename** field always contains the complete selected filename and supports selecting and copying text. Enable **Original names in playlist** to show filenames in the queue as well. Display cleanup never renames files or changes saved library titles. Hover a playlist item to see its full filename and path; drag the divider to give the playlist more room.
+
 ## Playback compatibility and preparation
 
 The UI accepts common video containers including MP4, M4V, MOV, MKV, WebM, AVI, MPEG, MPG, TS, and M2TS, plus audio formats including MP3, M4A, AAC, FLAC, WAV, and OGG. Actual playback is determined by the receiver's decoders and the codecs inside the container.

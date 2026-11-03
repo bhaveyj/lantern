@@ -11,15 +11,18 @@ import uuid
 from dataclasses import asdict
 from pathlib import Path
 
-from PySide6.QtCore import QLockFile, QObject, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QFontDatabase, QIcon, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSlider, QSpinBox, QStyle, QStyledItemDelegate, QSystemTrayIcon, QVBoxLayout, QWidget
+from PySide6.QtCore import QItemSelectionModel, QObject, QPoint, QRectF, QSignalBlocker, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QColor, QFont, QFontDatabase, QIcon, QPainter, QPen, QPixmap, QTextOption
+from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QSlider, QSpinBox, QSplitter, QStyle, QStyledItemDelegate, QSystemTrayIcon, QVBoxLayout, QWidget
 
 from .controller import Controller, Device, Discovery, validate_host
 from .library import Library, Subtitle, scan_files
 from .subtitle_dialog import SubtitleDialog
 from .subtitle_jobs import SubtitleJobs, inspect_media
 from .credentials import CredentialStore
+from .desktop_ui import ConnectionPanel, FeaturePanel, WrappedTitle, control_icon, draw_lines
+from .instance import SingleInstance
+from .presentation import describe_media
 from .theme import COLORS, apply_theme
 
 
@@ -186,7 +189,7 @@ class Worker(QObject):
 
 class PlaylistDelegate(QStyledItemDelegate):
     def sizeHint(self, option, index):
-        return QSize(200, 68)
+        return QSize(280, 82)
 
     def paint(self, painter, option, index):
         painter.save()
@@ -195,35 +198,32 @@ class PlaylistDelegate(QStyledItemDelegate):
         hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
         focused = bool(option.state & QStyle.StateFlag.State_HasFocus)
         rect = QRectF(option.rect).adjusted(2, 2, -2, -2)
-        painter.setBrush(QColor(COLORS["blue_surface"] if selected else COLORS["raised"] if hovered else COLORS["surface"]))
-        painter.setPen(QPen(QColor(COLORS["blue"] if selected or focused else "#1b2638"), 1))
+        painter.setBrush(QColor("#13233e" if selected else COLORS["raised"] if hovered else COLORS["background"]))
+        painter.setPen(QPen(QColor("#355784" if selected or focused else COLORS["background"]), 1))
         painter.drawRoundedRect(rect, 9, 9)
-        badge = QRectF(rect.left() + 13, rect.top() + (rect.height() - 43) / 2, 43, 43)
+        badge = QRectF(rect.left() + 11, rect.top() + 17, 32, 35)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor("#17376a" if selected else "#132039"))
         painter.drawRoundedRect(badge, 8, 8)
         font = QFont(option.font)
-        font.setPixelSize(10)
-        font.setWeight(QFont.Weight.Bold)
+        font.setPixelSize(9)
+        font.setWeight(QFont.Weight.Medium)
         painter.setFont(font)
         painter.setPen(QColor("#a8cdff" if selected else COLORS["blue"]))
         painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, str(index.data(int(Qt.ItemDataRole.UserRole) + 1) or "FILE"))
         lines = str(index.data(Qt.ItemDataRole.DisplayRole) or "").split("\n", 1)
-        left, width = rect.left() + 71, int(rect.width() - 125)
-        font.setPixelSize(14)
-        font.setWeight(QFont.Weight.DemiBold)
+        left, width = rect.left() + 54, max(1, int(rect.width() - 67))
+        font.setPixelSize(13)
+        font.setWeight(QFont.Weight.Medium)
         painter.setFont(font)
-        painter.setPen(QColor(COLORS["text"]))
-        title = painter.fontMetrics().elidedText(lines[0], Qt.TextElideMode.ElideMiddle, width)
-        painter.drawText(QRectF(left, rect.top() + 12, width, 25), Qt.AlignmentFlag.AlignVCenter, title)
-        font.setPixelSize(11)
+        single_line = painter.fontMetrics().horizontalAdvance(lines[0]) <= width
+        draw_lines(painter, lines[0], QRectF(left, rect.top() + 11, width, 36), font, COLORS["text"], 2)
+        font.setPixelSize(10)
         font.setWeight(QFont.Weight.Normal)
         painter.setFont(font)
         painter.setPen(QColor("#9fbbe5" if selected else COLORS["muted"]))
         detail = painter.fontMetrics().elidedText(lines[1] if len(lines) > 1 else "", Qt.TextElideMode.ElideMiddle, width)
-        painter.drawText(QRectF(left, rect.top() + 38, width, 20), Qt.AlignmentFlag.AlignVCenter, detail)
-        painter.setPen(QColor(COLORS["blue"] if selected else COLORS["disabled"]))
-        painter.drawText(QRectF(rect.right() - 40, rect.top(), 25, rect.height()), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, f"{index.row() + 1:02}")
+        painter.drawText(QRectF(left, rect.top() + (33 if single_line else 51), width, 19), Qt.AlignmentFlag.AlignVCenter, detail)
         painter.restore()
 
 
@@ -246,6 +246,7 @@ class Playlist(QListWidget):
         self.setMouseTracking(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setItemDelegate(PlaylistDelegate(self))
+        self.setAccessibleName("Playlist")
         self.placeholder = QWidget(self.viewport())
         self.placeholder.setObjectName("emptyState")
         self.placeholder.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -259,6 +260,7 @@ class Playlist(QListWidget):
         empty_layout.addWidget(empty_icon, 0, Qt.AlignmentFlag.AlignHCenter)
         for text, name in [("A good night starts with a file.", "emptyTitle"), ("Drop video or audio here, or choose Add files.", "muted")]:
             item = label(text, name)
+            item.setWordWrap(True)
             item.setAlignment(Qt.AlignmentFlag.AlignCenter)
             empty_layout.addWidget(item)
         empty_layout.addStretch()
@@ -289,6 +291,7 @@ class Playlist(QListWidget):
 
 def label(text, name=None):
     widget = QLabel(text)
+    widget.setTextFormat(Qt.TextFormat.PlainText)
     if name:
         widget.setObjectName(name)
     return widget
@@ -306,7 +309,7 @@ class Window(QMainWindow):
         super().__init__()
         self.setWindowTitle("Lantern · Local files, big screen")
         self.setWindowIcon(icon())
-        self.resize(1120, 800)
+        self.resize(1180, 840)
         self.setMinimumSize(960, 720)
         self.library = Library(data / "library.sqlite3")
         self.cloud_credentials = CredentialStore(data / "deepgram.key")
@@ -318,6 +321,7 @@ class Window(QMainWindow):
         self.worker.event.connect(self.on_event)
         self.devices: dict[str, dict] = {}
         self.connected_kind = ""
+        self.connected_name = ""
         self.playing = False
         self.finished = False
         self.busy = False
@@ -337,7 +341,7 @@ class Window(QMainWindow):
         menu.addSeparator()
         menu.addAction("Quit", self.quit)
         self.tray.setContextMenu(menu)
-        self.tray.activated.connect(lambda reason: self.show_normal() if reason == QSystemTrayIcon.ActivationReason.DoubleClick else None)
+        self.tray.activated.connect(lambda reason: self.show_normal() if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick) else None)
         self.tray.show()
         if discover:
             QTimer.singleShot(200, self.worker.scan)
@@ -360,22 +364,28 @@ class Window(QMainWindow):
         monogram.setFixedSize(32, 32)
         top.addWidget(monogram)
         top.addWidget(label("lantern", "brand"))
+        top.addSpacing(24)
+        top.addWidget(label("Playlist", "activeTab"))
         top.addStretch()
-        top.addWidget(label("WINDOWS", "edition"))
+        self.device_button = QPushButton("Choose your TV")
+        self.device_button.setObjectName("deviceButton")
+        self.device_button.setIcon(control_icon("tv"))
+        self.device_button.setCheckable(True)
+        self.device_button.setToolTip("Choose a TV or manage your connection")
+        self.device_button.setAccessibleName("TV connection")
+        top.addWidget(self.device_button)
         layout.addLayout(top)
-        intro = QVBoxLayout()
-        intro.setSpacing(5)
-        intro.addWidget(label("Your library. Bigger screen.", "hero"))
-        intro.addWidget(label("Pick a file. Choose your TV. Press play.", "muted"))
-        layout.addLayout(intro)
 
-        connection = QWidget()
-        connection.setObjectName("card")
-        row = QHBoxLayout(connection)
-        row.setContentsMargins(18, 15, 18, 15)
+        self.connection_panel = ConnectionPanel(self)
+        self.device_button.toggled.connect(self.toggle_connection_panel)
+        self.connection_panel.closed.connect(self.connection_panel_closed)
+        row = QHBoxLayout(self.connection_panel)
+        row.setContentsMargins(16, 12, 16, 12)
         row.addWidget(label("WATCH ON", "section"))
         self.tv = QComboBox()
         self.tv.setMinimumWidth(260)
+        self.tv.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.tv.setAccessibleName("Available TVs")
         self.tv.addItem("Looking for TVs…", None)
         row.addWidget(self.tv, 1)
         self.connect_button = QPushButton("Connect")
@@ -399,46 +409,144 @@ class Window(QMainWindow):
         options_menu.addAction("Reset saved pairings…", self.reset_pairings)
         options.setMenu(options_menu)
         row.addWidget(options)
-        layout.addWidget(connection)
+
+        self.workspace = QSplitter(Qt.Orientation.Horizontal)
+        self.workspace.setObjectName("workspace")
+        self.workspace.setChildrenCollapsible(False)
+        self.workspace.setHandleWidth(18)
+        self.feature = FeaturePanel()
+        feature_layout = QVBoxLayout(self.feature)
+        feature_layout.setContentsMargins(28, 24, 28, 24)
+        feature_layout.setSpacing(10)
+        self.feature_heading = label("SELECTED MEDIA", "section")
+        feature_layout.addWidget(self.feature_heading)
+        feature_layout.addStretch(1)
+        self.feature_context = label("", "featureContext")
+        feature_layout.addWidget(self.feature_context)
+        self.feature_title = WrappedTitle("Your next watch starts here.")
+        self.feature_title.setObjectName("featureTitle")
+        title_font = QFont("Segoe UI")
+        title_font.setPixelSize(36)
+        title_font.setWeight(QFont.Weight.Medium)
+        self.feature_title.setFont(title_font)
+        feature_layout.addWidget(self.feature_title)
+        self.feature_metadata = label("Add local video or audio files to get started.", "featureMetadata")
+        self.feature_metadata.setWordWrap(True)
+        feature_layout.addWidget(self.feature_metadata)
+        feature_layout.addStretch(1)
+        feature_bottom = QHBoxLayout()
+        self.feature_status = ElidedLabel("Local files. Bigger screen.")
+        self.feature_status.setObjectName("featureContext")
+        self.feature_status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        feature_bottom.addWidget(self.feature_status, 1)
+        self.feature_action = QPushButton("Add files")
+        self.feature_action.setObjectName("featureAction")
+        self.feature_action.clicked.connect(self.play_feature)
+        feature_bottom.addWidget(self.feature_action)
+        feature_layout.addLayout(feature_bottom)
+        self.workspace.addWidget(self.feature)
+
+        sidebar = QWidget()
+        sidebar.setMinimumWidth(312)
+        sidebar.setMaximumWidth(480)
+        side = QVBoxLayout(sidebar)
+        side.setContentsMargins(0, 0, 0, 0)
+        side.setSpacing(12)
 
         heading = QHBoxLayout()
-        self.count = label("YOUR PLAYLIST · 0 / 200", "section")
-        heading.addWidget(self.count)
+        heading.addWidget(label("Your playlist", "queueHeading"))
         heading.addStretch()
+        self.count = label("0 / 200", "section")
+        heading.addWidget(self.count)
+        side.addLayout(heading)
+
         remove = QPushButton("Remove selected")
         remove.setObjectName("quiet")
         remove.clicked.connect(self.remove_selected)
-        heading.addWidget(remove)
-        add = QPushButton("+ Add files")
+        add = QPushButton("Add files")
+        add.setIcon(control_icon("plus"))
         add.setObjectName("outline")
         add.clicked.connect(self.choose_files)
-        heading.addWidget(add)
-        layout.addLayout(heading)
         self.queue = Playlist()
+        self.queue.setObjectName("playlist")
         self.queue.files_dropped.connect(self.add_files)
         self.queue.currentItemChanged.connect(self.selection_changed)
         self.queue.itemDoubleClicked.connect(lambda _: self.play_selected())
         self.queue.model().rowsMoved.connect(self.save_order)
-        layout.addWidget(self.queue, 1)
+        side.addWidget(self.queue, 1)
         self.empty = self.queue.placeholder
+        queue_tools = QHBoxLayout()
+        queue_tools.addWidget(add)
+        queue_tools.addStretch()
+        queue_tools.addWidget(remove)
+        side.addLayout(queue_tools)
 
-        subs = QHBoxLayout()
-        subs.addWidget(label("Subtitles", "muted"))
+        subtitle_panel = QWidget()
+        subtitle_panel.setObjectName("subtitlePanel")
+        subs = QVBoxLayout(subtitle_panel)
+        subs.setContentsMargins(0, 14, 0, 0)
+        subs.setSpacing(10)
+        subs.addWidget(label("SUBTITLES", "section"))
         self.subtitles = QComboBox()
+        self.subtitles.setAccessibleName("Subtitle track")
+        self.subtitles.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.subtitles.setMinimumContentsLength(12)
+        self.subtitles.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.subtitles.currentIndexChanged.connect(self.subtitle_changed)
-        subs.addWidget(self.subtitles, 1)
-        choose_sub = QPushButton("Choose subtitle…")
+        subs.addWidget(self.subtitles)
+        sub_actions = QHBoxLayout()
+        sub_actions.setSpacing(4)
+        choose_sub = QPushButton("Choose file…")
+        choose_sub.setObjectName("smallQuiet")
+        choose_sub.setAccessibleName("Choose subtitle file")
         choose_sub.clicked.connect(self.choose_subtitle)
-        subs.addWidget(choose_sub)
-        self.create_subtitles = QPushButton("Create subtitles…")
+        sub_actions.addWidget(choose_sub)
+        self.create_subtitles = QPushButton("Create…")
+        self.create_subtitles.setObjectName("smallQuiet")
+        self.create_subtitles.setAccessibleName("Create subtitles")
         self.create_subtitles.clicked.connect(self.open_subtitle_dialog)
-        subs.addWidget(self.create_subtitles)
+        sub_actions.addWidget(self.create_subtitles)
+        sub_actions.addStretch()
         self.fit = QPushButton("Fit / Fill")
+        self.fit.setObjectName("smallQuiet")
         self.fit.setCheckable(True)
         self.fit.setEnabled(False)
         self.fit.clicked.connect(lambda checked: self.worker.submit("command", "fit", "fill" if checked else "fit"))
-        subs.addWidget(self.fit)
-        layout.addLayout(subs)
+        sub_actions.addWidget(self.fit)
+        subs.addLayout(sub_actions)
+        side.addWidget(subtitle_panel)
+        self.workspace.addWidget(sidebar)
+        self.workspace.setStretchFactor(0, 1)
+        self.workspace.setStretchFactor(1, 0)
+        self.workspace.setSizes([690, 330])
+        layout.addWidget(self.workspace, 1)
+
+        details = QWidget()
+        details.setObjectName("fileDetails")
+        detail_layout = QVBoxLayout(details)
+        detail_layout.setContentsMargins(16, 12, 16, 10)
+        detail_layout.setSpacing(7)
+        detail_heading = QHBoxLayout()
+        detail_heading.addWidget(label("ORIGINAL FILENAME", "section"))
+        detail_heading.addStretch()
+        self.file_warning = label("", "fileWarning")
+        detail_heading.addWidget(self.file_warning)
+        self.original_names = QCheckBox("Original names in playlist")
+        self.original_names.setObjectName("originalNames")
+        self.original_names.toggled.connect(self.refresh_library)
+        detail_heading.addWidget(self.original_names)
+        detail_layout.addLayout(detail_heading)
+        self.original_filename = QPlainTextEdit()
+        self.original_filename.setObjectName("originalFilename")
+        self.original_filename.setAccessibleName("Original filename")
+        self.original_filename.setReadOnly(True)
+        self.original_filename.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self.original_filename.setTabChangesFocus(True)
+        self.original_filename.setFrameShape(QFrame.Shape.NoFrame)
+        self.original_filename.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.original_filename.setFixedHeight(45)
+        detail_layout.addWidget(self.original_filename)
+        layout.addWidget(details)
 
         self.subtitle_activity = QWidget()
         subtitle_row = QHBoxLayout(self.subtitle_activity)
@@ -457,46 +565,105 @@ class Window(QMainWindow):
         layout.addWidget(self.subtitle_activity)
 
         controls = QWidget()
-        controls.setObjectName("card")
-        controls_layout = QVBoxLayout(controls)
-        controls_layout.setContentsMargins(20, 16, 20, 16)
-        controls_layout.addWidget(label("PLAYBACK", "playerHeading"))
+        controls.setObjectName("playbackDock")
+        controls_layout = QHBoxLayout(controls)
+        controls_layout.setContentsMargins(18, 14, 18, 14)
+        controls_layout.setSpacing(18)
+        now_column = QVBoxLayout()
+        now_column.setSpacing(4)
+        now_column.addWidget(label("NOW ON TV", "playerHeading"))
         self.now = ElidedLabel("Nothing playing yet")
         self.now.setObjectName("now")
         self.now.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        controls_layout.addWidget(self.now)
+        now_column.addWidget(self.now)
+        self.playback_destination = label("Not connected", "status")
+        now_column.addWidget(self.playback_destination)
+        now_widget = QWidget()
+        now_widget.setObjectName("nowDetails")
+        now_widget.setLayout(now_column)
+        now_widget.setFixedWidth(164)
+        now_column.setContentsMargins(0, 0, 0, 0)
+        controls_layout.addWidget(now_widget)
+        center = QVBoxLayout()
+        center.setSpacing(5)
         timeline = QHBoxLayout()
         self.elapsed = label("0:00", "muted")
         timeline.addWidget(self.elapsed)
         self.seek = QSlider(Qt.Orientation.Horizontal)
+        self.seek.setAccessibleName("Playback position")
         self.seek.setRange(0, 1000)
         self.seek.sliderReleased.connect(lambda: self.worker.submit("command", "seek", self.seek.value() * self.duration / 1000))
         timeline.addWidget(self.seek, 1)
         self.total = label("0:00", "muted")
         timeline.addWidget(self.total)
-        controls_layout.addLayout(timeline)
         transport = QHBoxLayout()
+        transport.setSpacing(7)
+        transport.addStretch()
         for text, action, value in [("Previous", "previous", None), ("−30s", "relative", -30)]:
             button = QPushButton(text)
+            button.setObjectName("transport")
+            button.setAccessibleName(text)
+            if action == "previous":
+                button.setIcon(control_icon("previous"))
+                button.setText("")
+                button.setToolTip("Previous file")
             button.clicked.connect(lambda _, a=action, v=value: self.transport(a, v))
             transport.addWidget(button)
-        self.play_button = QPushButton("Play on TV")
-        self.play_button.setObjectName("primary")
+        self.play_button = QPushButton()
+        self.play_button.setObjectName("playCircle")
+        self.play_button.setFixedSize(44, 44)
+        self.play_button.setIconSize(QSize(19, 19))
+        self.set_play_button("Play on TV", False)
         self.play_button.clicked.connect(self.play_pause)
         transport.addWidget(self.play_button)
-        for text, action, value in [("+30s", "relative", 30), ("Next", "next", None), ("Stop", "stop", None)]:
+        for text, action, value in [("+30s", "relative", 30), ("Next", "next", None)]:
             button = QPushButton(text)
+            button.setObjectName("transport")
+            button.setAccessibleName(text)
+            if action == "next":
+                button.setIcon(control_icon("next"))
+                button.setText("")
+                button.setToolTip("Next file")
             button.clicked.connect(lambda _, a=action, v=value: self.transport(a, v))
             transport.addWidget(button)
         transport.addStretch()
-        transport.addWidget(label("Volume", "muted"))
+        center.addLayout(transport)
+        center.addLayout(timeline)
+        controls_layout.addLayout(center, 1)
+        tools = QVBoxLayout()
+        tool_buttons = QHBoxLayout()
+        tool_buttons.addStretch()
+        stop = QPushButton()
+        stop.setObjectName("transport")
+        stop.setIcon(control_icon("stop"))
+        stop.setToolTip("Stop playback")
+        stop.setAccessibleName("Stop playback")
+        stop.clicked.connect(lambda: self.transport("stop", None))
+        tool_buttons.addWidget(stop)
+        captions = QPushButton()
+        captions.setObjectName("transport")
+        captions.setIcon(control_icon("captions"))
+        captions.setAccessibleName("Subtitle tools")
+        captions.setToolTip("Subtitle tools")
+        captions_menu = QMenu(captions)
+        captions_menu.addAction("Choose subtitle file…", self.choose_subtitle)
+        self.create_subtitle_action = captions_menu.addAction("Create subtitles…", self.open_subtitle_dialog)
+        captions.setMenu(captions_menu)
+        tool_buttons.addWidget(captions)
+        tools.addLayout(tool_buttons)
+        volume_row = QHBoxLayout()
+        volume_label = QLabel()
+        volume_label.setPixmap(control_icon("volume").pixmap(16, 16))
+        volume_row.addWidget(volume_label)
         self.volume = QSlider(Qt.Orientation.Horizontal)
+        self.volume.setAccessibleName("Volume")
         self.volume.setRange(0, 100)
         self.volume.setValue(80)
         self.volume.setMaximumWidth(100)
         self.volume.sliderReleased.connect(lambda: self.worker.submit("command", "volume", self.volume.value() / 100))
-        transport.addWidget(self.volume)
-        controls_layout.addLayout(transport)
+        volume_row.addWidget(self.volume)
+        tools.addLayout(volume_row)
+        controls_layout.addLayout(tools)
         layout.addWidget(controls)
         self.progress = QProgressBar()
         self.progress.setTextVisible(False)
@@ -505,6 +672,81 @@ class Window(QMainWindow):
         self.status = label("Ready · Local files. Home network. Bigger screen.", "status")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
+        self.tv.currentIndexChanged.connect(self.update_connection_button)
+
+    def set_play_button(self, text, playing):
+        self.play_button.setIcon(control_icon("pause" if playing else "play", "#ffffff"))
+        self.play_button.setAccessibleName(text)
+        self.play_button.setToolTip(text)
+
+    def toggle_connection_panel(self, visible):
+        if visible:
+            self.connection_panel.adjustSize()
+            self.connection_panel.resize(self.width() - 56, self.connection_panel.sizeHint().height())
+            self.connection_panel.move(self.mapToGlobal(QPoint(28, self.device_button.y() + self.device_button.height() + 10)))
+            self.connection_panel.show()
+        else:
+            self.connection_panel.hide()
+
+    def connection_panel_closed(self):
+        with QSignalBlocker(self.device_button):
+            self.device_button.setChecked(False)
+
+    def update_connection_button(self, *args):
+        name = self.connected_name if self.connected_kind else "Choose your TV"
+        shown = self.device_button.fontMetrics().elidedText(name, Qt.TextElideMode.ElideRight, 195)
+        self.device_button.setText(shown + "  ▾")
+        self.device_button.setToolTip(name + (" · Connected securely" if self.connected_kind == "receiver" else " · Google Cast" if self.connected_kind else " · Connection settings"))
+        self.playback_destination.setText(self.connected_name or "Not connected")
+        self.playback_destination.setToolTip(self.connected_name)
+
+    def play_feature(self):
+        if self.selected_id():
+            if self.current_id == self.selected_id() and not self.finished:
+                self.worker.submit("command", "pause" if self.playing else "play")
+            else:
+                self.play_selected()
+        else:
+            self.choose_files()
+
+    def update_feature(self):
+        media_id = self.selected_id()
+        media = next((m for m in self.library.items if m.id == media_id), None)
+        if media:
+            display = describe_media(media.path, media.title)
+            self.feature_title.setText(display.title)
+            self.feature_title.setToolTip(display.title)
+            self.feature_context.setText(display.context)
+            self.feature_context.setVisible(bool(display.context))
+            self.feature_metadata.setText(" · ".join((*display.details, display.format)))
+            if self.original_filename.toPlainText() != display.filename:
+                self.original_filename.setPlainText(display.filename)
+            self.original_filename.setToolTip(media.path)
+            missing = self._availability.get(media.id) is False
+            self.file_warning.setText("Original file unavailable" if missing else "")
+            active = self.current_id == media_id
+            self.feature_heading.setText("NOW ON YOUR TV" if active else "SELECTED MEDIA")
+            self.feature_status.setText("Original file unavailable" if missing else "Playing on your TV" if active and self.playing else "Paused on your TV" if active and not self.finished else "Ready on your TV" if self.connected_kind else "Connect a TV to start watching")
+            self.feature_action.setText("Pause on TV" if active and self.playing else "Play again" if active and self.finished else "Resume" if active else "Play on TV")
+            self.feature_action.setIcon(control_icon("pause" if active and self.playing else "play", "#c8dcff"))
+        else:
+            self.feature_heading.setText("YOUR NEXT WATCH")
+            self.feature_title.setText("Your library.\nBigger screen.")
+            self.feature_title.setToolTip("")
+            self.feature_context.setVisible(False)
+            self.feature_metadata.setText("Add local video or audio files to get started.")
+            self.feature_status.setText("Your files. Your home network.")
+            self.feature_action.setText("Add files")
+            self.feature_action.setIcon(control_icon("plus", "#c8dcff"))
+            self.original_filename.setPlainText("Select a file to see its complete original filename.")
+            self.original_filename.setToolTip("")
+            self.file_warning.clear()
+        if not self.current_id:
+            self.set_play_button("Play on TV", False)
+        elif self.current_id == self.selected_id():
+            self.set_play_button("Pause" if self.playing else "Play again" if self.finished else "Resume", self.playing)
+        else:
+            self.set_play_button("Play selected file on TV", False)
 
     def sync_library(self):
         self.worker.submit("sync", [asdict(m) for m in self.library.items])
@@ -512,20 +754,30 @@ class Window(QMainWindow):
 
     def refresh_library(self):
         selected = self.selected_id()
-        self.queue.clear()
-        for media in self.library.items:
-            suffix = Path(media.path).suffix[1:].upper()
-            item = QListWidgetItem(f"{media.title}\n{'Original file unavailable' if self._availability.get(media.id) is False else Path(media.path).name}")
-            item.setData(Qt.ItemDataRole.UserRole, media.id)
-            item.setData(int(Qt.ItemDataRole.UserRole) + 1, suffix)
-            item.setToolTip(media.path)
-            self.queue.addItem(item)
-            if selected == media.id:
-                self.queue.setCurrentItem(item)
-        self.count.setText(f"YOUR PLAYLIST · {len(self.library.items)} / 200")
+        selected_ids = {item.data(Qt.ItemDataRole.UserRole) for item in self.queue.selectedItems()}
+        current = None
+        with QSignalBlocker(self.queue):
+            self.queue.clear()
+            for media in self.library.items:
+                display = describe_media(media.path, media.title)
+                title = display.filename if self.original_names.isChecked() else display.title
+                detail = "Original file unavailable" if self._availability.get(media.id) is False else display.summary
+                item = QListWidgetItem(f"{title}\n{detail}")
+                item.setData(Qt.ItemDataRole.UserRole, media.id)
+                item.setData(int(Qt.ItemDataRole.UserRole) + 1, display.format)
+                item.setToolTip(display.filename + "\n" + media.path)
+                self.queue.addItem(item)
+                if media.id in selected_ids:
+                    item.setSelected(True)
+                if selected == media.id:
+                    current = item
+            if current is not None:
+                self.queue.setCurrentItem(current, QItemSelectionModel.SelectionFlag.NoUpdate)
+            elif self.queue.count():
+                self.queue.setCurrentRow(0)
+        self.count.setText(f"{len(self.library.items)} / 200")
         self.empty.setVisible(not self.library.items)
-        if self.queue.count() and not self.queue.currentItem():
-            self.queue.setCurrentRow(0)
+        self.selection_changed()
 
     def selected_id(self):
         current = self.queue.currentItem() if hasattr(self, "queue") else None
@@ -565,6 +817,7 @@ class Window(QMainWindow):
             index = self.subtitles.findData(media.selected_subtitle)
             self.subtitles.setCurrentIndex(max(0, index))
         self.rendering = False
+        self.update_feature()
 
     def subtitle_changed(self, *args):
         if self.rendering or not self.selected_id():
@@ -740,6 +993,7 @@ class Window(QMainWindow):
             elif event == "subtitles.started":
                 self.subtitle_busy = True
                 self.create_subtitles.setEnabled(False)
+                self.create_subtitle_action.setEnabled(False)
                 self.subtitle_activity.show()
                 self.subtitle_status.setText("Preparing subtitles…")
                 self.subtitle_progress.setRange(0, 0)
@@ -758,6 +1012,7 @@ class Window(QMainWindow):
             elif event == "subtitles.finished":
                 self.subtitle_busy = False
                 self.create_subtitles.setEnabled(True)
+                self.create_subtitle_action.setEnabled(True)
                 self.subtitle_activity.hide()
             self.sleep_hold()
             return
@@ -790,15 +1045,20 @@ class Window(QMainWindow):
                 self.tv.removeItem(index)
         elif event == "connected":
             self.connected_kind = data["kind"]
+            self.connected_name = data.get("name", "TV")
             self.connect_button.setText("Reconnect")
             self.fit.setEnabled(self.connected_kind == "receiver")
+            self.device_button.setChecked(False)
+            self.update_connection_button()
         elif event == "disconnected":
             self.connected_kind = ""
+            self.connected_name = ""
             self.current_id = None
             self.playing = False
-            self.play_button.setText("Play on TV")
+            self.set_play_button("Play on TV", False)
             self.connect_button.setText("Connect")
             self.fit.setEnabled(False)
+            self.update_connection_button()
         elif event == "status":
             self.status.setText(data["message"])
             self.busy = data.get("busy", False)
@@ -814,15 +1074,16 @@ class Window(QMainWindow):
             self.finished = data.get("playerState") == "IDLE" and data.get("idleReason") == "FINISHED"
             self.position = data.get("position", 0)
             self.duration = data.get("duration", 0)
-            self.play_button.setText("Pause" if self.playing else "Play again" if self.finished else "Resume" if self.current_id else "Play on TV")
+            self.seek.setEnabled(self.duration > 0)
             media = next((m for m in self.library.items if m.id == self.current_id), None)
             if media and "subtitleId" in data and media.selected_subtitle != data["subtitleId"]:
                 media.selected_subtitle = data["subtitleId"]
                 self.library.save()
                 if self.selected_id() == media.id:
                     self.selection_changed()
-            self.now.setText(media.title if media else "Nothing playing yet")
-            self.now.setToolTip(media.title if media else "")
+            title = describe_media(media.path, media.title).title if media else ""
+            self.now.setText(title or "Nothing playing yet")
+            self.now.setToolTip(title)
             self.update_time()
         elif event == "error":
             self.busy = False
@@ -830,6 +1091,7 @@ class Window(QMainWindow):
             self.show_error(data["message"])
         elif event == "notice":
             self.status.setText(data["message"])
+        self.update_feature()
         self.sleep_hold()
 
     def tick(self):
@@ -852,8 +1114,14 @@ class Window(QMainWindow):
         QMessageBox.warning(self, "Lantern", message)
 
     def show_normal(self):
-        self.showNormal()
+        self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
+        self.show()
+        self.raise_()
         self.activateWindow()
+        modal = QApplication.activeModalWidget()
+        if modal and self.isAncestorOf(modal):
+            modal.raise_()
+            modal.activateWindow()
 
     def closeEvent(self, event):
         if not self.quitting and self.connected_kind and QSystemTrayIcon.isSystemTrayAvailable():
@@ -903,18 +1171,28 @@ def main():
     app.setApplicationName("Lantern TV")
     app.setStyle("Fusion")
     apply_theme(app)
-    lock = QLockFile(str(args.data_dir / "lantern.lock"))
-    if not lock.tryLock(100):
-        QMessageBox.information(None, "Lantern", "Lantern is already running. Open it from the system tray.")
-        return
-    window = Window(args.data_dir, not args.no_discovery and not args.preview)
-    window.show()
-    if args.preview:
-        def capture():
-            window.grab().save(str(args.preview))
-            window.quit()
-        QTimer.singleShot(700, capture)
-    sys.exit(app.exec())
+    instance = SingleInstance(args.data_dir)
+    try:
+        if not instance.acquire():
+            if instance.activate_existing():
+                return
+            # The old instance may have finished shutting down during activation.
+            if not instance.acquire():
+                QMessageBox.warning(None, "Lantern", "Lantern could not reopen its existing window. It may still be starting or closing. Please try opening it again shortly.")
+                return
+        instance.listen()
+        window = Window(args.data_dir, not args.no_discovery and not args.preview)
+        instance.activated.connect(window.show_normal)
+        window.show()
+        if args.preview:
+            def capture():
+                window.grab().save(str(args.preview))
+                window.quit()
+            QTimer.singleShot(700, capture)
+        result = app.exec()
+    finally:
+        instance.close()
+    sys.exit(result)
 
 
 if __name__ == "__main__":
