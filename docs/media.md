@@ -4,9 +4,11 @@
 
 ## Desktop playlist and filenames
 
-Use **Choose your TV** in the header to select, connect, or manage a receiver. Connection settings open above the workspace; playback controls stay in the bottom dock.
+Use **Choose your TV** in the header to select, connect, or manage a receiver. **Add files** and the full-width playlist are the main workspace; playback controls stay in the slim bottom bar.
 
-The playlist shows readable display titles when a filename contains recognizable release markers, with resolution and audio/picture details underneath. Ambiguous names and custom library titles are preserved. The **Original filename** field always contains the complete selected filename and supports selecting and copying text. Enable **Original names in playlist** to show filenames in the queue as well. Display cleanup never renames files or changes saved library titles. Hover a playlist item to see its full filename and path; drag the divider to give the playlist more room.
+The playlist shows readable display titles when a filename contains recognizable release markers, with resolution and audio/picture details underneath. Ambiguous names and custom library titles are preserved. Use a row's **Info** control, or **Playlist options → File details…** (`Ctrl+I`), to select and copy the complete original filename and view its location. Opening details preserves selection and active playback. **Playlist options → Show original filenames** changes the queue display without renaming files or changing saved library titles. Hover a playlist item to see its full filename and path. Drag rows to reorder; use **Playlist options → Remove selected** or `Delete` in the playlist to remove entries without deleting source files.
+
+The **Subtitles** control in the playback bar opens tracks and subtitle creation tools for the selected file; the popup names that file explicitly. Volume opens in its own compact popup. **More playback controls** contains 30-second skips, picture fit/fill for Lantern receivers, and Stop. Subtitle job progress and cancellation appear while a job is running.
 
 ## Playback compatibility and preparation
 

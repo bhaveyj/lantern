@@ -1,12 +1,11 @@
-"""Native drawing primitives for the Afterdark desktop layout."""
+"""Native drawing, popups and file details for the Quiet Queue desktop."""
 from __future__ import annotations
 
 from functools import lru_cache
-from math import ceil
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QTextLayout, QTextOption
-from PySide6.QtWidgets import QFrame, QLabel, QSizePolicy, QWidget
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap, QPolygonF, QTextLayout, QTextOption
+from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QFrame, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QVBoxLayout
 
 from .theme import COLORS
 
@@ -44,93 +43,70 @@ def draw_lines(painter, text, rect, font, color, lines=2):
     painter.restore()
 
 
-class WrappedTitle(QLabel):
-    def __init__(self, text="", lines=3, parent=None):
-        super().__init__(text, parent)
-        self.lines = lines
-        self.setTextFormat(Qt.TextFormat.PlainText)
-        policy = QSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        policy.setHeightForWidth(True)
-        self.setSizePolicy(policy)
-
-    def setText(self, text):
-        super().setText(text)
-        self.updateGeometry()
-
-    def sizeHint(self):
-        return QSize(300, self.heightForWidth(max(300, self.width())))
-
-    def heightForWidth(self, width):
-        layout = QTextLayout(self.text().replace("\n", "\u2028"), self.font())
-        option = QTextOption()
-        option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
-        layout.setTextOption(option)
-        layout.beginLayout()
-        height = 0
-        for _ in range(self.lines):
-            line = layout.createLine()
-            if not line.isValid():
-                break
-            line.setLineWidth(max(1, width))
-            height += line.height()
-        layout.endLayout()
-        return ceil(height) + 4
-
-    def minimumSizeHint(self):
-        return QSize(0, self.fontMetrics().lineSpacing() + 4)
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        draw_lines(painter, self.text(), QRectF(self.contentsRect()), self.font(), COLORS["text"], self.lines)
-
-
-class ConnectionPanel(QFrame):
+class PopupPanel(QFrame):
     closed = Signal()
 
     def __init__(self, parent):
         super().__init__(parent, Qt.WindowType.Popup)
-        self.setObjectName("connectionPanel")
+        self.setObjectName("controlPanel")
 
     def hideEvent(self, event):
         super().hideEvent(event)
         self.closed.emit()
 
 
-class FeaturePanel(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.setObjectName("featurePanel")
-        self.setMinimumWidth(280)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+class FileDetailsDialog(QDialog):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle("File details")
+        self.resize(600, 330)
+        self.setMinimumWidth(420)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 20)
+        layout.setSpacing(12)
+        self.title = QLabel()
+        self.title.setTextFormat(Qt.TextFormat.PlainText)
+        self.title.setWordWrap(True)
+        self.title.setObjectName("detailsTitle")
+        layout.addWidget(self.title)
+        self.metadata = QLabel()
+        self.metadata.setTextFormat(Qt.TextFormat.PlainText)
+        self.metadata.setWordWrap(True)
+        self.metadata.setObjectName("status")
+        layout.addWidget(self.metadata)
+        layout.addWidget(QLabel("Original filename"))
+        self.filename = QPlainTextEdit()
+        self.filename.setObjectName("originalFilename")
+        self.filename.setAccessibleName("Original filename")
+        self.filename.setReadOnly(True)
+        self.filename.setTabChangesFocus(True)
+        self.filename.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self.filename.setMinimumHeight(75)
+        self.filename.setMaximumHeight(110)
+        layout.addWidget(self.filename)
+        layout.addWidget(QLabel("Location"))
+        self.location = QLineEdit()
+        self.location.setReadOnly(True)
+        self.location.setAccessibleName("Original file location")
+        layout.addWidget(self.location)
+        self.warning = QLabel("Original file unavailable")
+        self.warning.setObjectName("fileWarning")
+        self.warning.hide()
+        layout.addWidget(self.warning)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        copy = QPushButton("Copy filename")
+        copy.clicked.connect(lambda: QApplication.clipboard().setText(self.filename.toPlainText()))
+        buttons.addButton(copy, QDialogButtonBox.ButtonRole.ActionRole)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
 
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = QRectF(self.rect()).adjusted(.5, .5, -.5, -.5)
-        clip = QPainterPath()
-        clip.addRoundedRect(rect, 14, 14)
-        painter.setClipPath(clip)
-        background = QLinearGradient(rect.topLeft(), rect.bottomRight())
-        background.setColorAt(0, QColor("#0d1524"))
-        background.setColorAt(.55, QColor("#101d33"))
-        background.setColorAt(1, QColor("#1b355c"))
-        painter.fillRect(rect, background)
-        painter.save()
-        painter.translate(rect.width() - 135, rect.height() * .45)
-        painter.rotate(-34)
-        for offset in (0, 63, 126):
-            beam = QRectF(offset, -150 + offset * .45, 33, rect.height() + 230)
-            light = QLinearGradient(beam.topLeft(), beam.bottomLeft())
-            light.setColorAt(0, QColor(26, 53, 96, 0))
-            light.setColorAt(.42, QColor("#345990"))
-            light.setColorAt(.62, QColor("#658dc8"))
-            light.setColorAt(.76, QColor("#284a7f"))
-            light.setColorAt(1, QColor(20, 45, 82, 0))
-            painter.fillRect(beam, light)
-        painter.restore()
-        painter.setPen(QPen(QColor("#2b3d59"), 1))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRoundedRect(rect, 14, 14)
+    def set_media(self, display, path, missing=False):
+        self.title.setText(display.title)
+        self.metadata.setText(" · ".join(filter(None, (display.context, *display.details, display.format))))
+        self.filename.setPlainText(display.filename)
+        self.location.setText(path)
+        self.location.setCursorPosition(0)
+        self.warning.setVisible(missing)
 
 
 @lru_cache(maxsize=32)
@@ -173,6 +149,21 @@ def control_icon(name, color="#b4c9ea"):
         elif name == "plus":
             p.drawLine(12, 5, 12, 19)
             p.drawLine(5, 12, 19, 12)
+        elif name == "file":
+            p.drawRoundedRect(QRectF(4, 4, 16, 16), 2, 2)
+            p.drawLine(8, 4, 8, 20)
+            p.drawLine(16, 4, 16, 20)
+            for y in (8, 12, 16):
+                p.drawLine(4, y, 8, y)
+                p.drawLine(16, y, 20, y)
+        elif name == "info":
+            p.drawEllipse(QRectF(4, 4, 16, 16))
+            p.drawLine(12, 11, 12, 16)
+            p.drawPoint(12, 8)
+        elif name == "more":
+            p.setPen(QPen(QColor(color), 2.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            for x in (5, 12, 19):
+                p.drawPoint(x, 12)
         elif name == "volume":
             p.drawPolygon(QPolygonF([QPointF(4, 9), QPointF(8, 9), QPointF(13, 5), QPointF(13, 19), QPointF(8, 15), QPointF(4, 15)]))
             p.drawArc(QRectF(12, 5, 8, 14), -65 * 16, 130 * 16)

@@ -6,11 +6,12 @@ import aiohttp
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from lantern.app import Window, Worker
-from lantern.library import Library, scan_files
+from lantern.app import PlaylistDelegate, Window, Worker
+from lantern.library import Library, Subtitle, scan_files
 from lantern.subtitle_dialog import SubtitleDialog
 
 LONG_NAME = "Spider-Man.Brand.New.Day.2026.IMAX.2160p.CORE.WEB-DL.DDP5.1.Atmos.HDR.H.265-NotSoNewDayForSony.mkv"
@@ -47,8 +48,10 @@ async def test_readable_names_preserve_files_records_selection_and_full_details(
     try:
         media = window.library.add([str(first), str(second)])
         window.refresh_library()
-        assert window.feature_title.text() == "Spider-Man Brand New Day"
-        assert window.original_filename.toPlainText() == LONG_NAME
+        assert window.queue.item(0).text().startswith("Spider-Man Brand New Day\n")
+        assert not window.file_details_dialog.isVisible()
+        window.show_file_details()
+        assert window.file_details_dialog.filename.toPlainText() == LONG_NAME
         assert "2160p" in window.queue.item(0).text()
         window.queue.item(1).setSelected(True)
         before = {item.data(256) for item in window.queue.selectedItems()}
@@ -59,13 +62,13 @@ async def test_readable_names_preserve_files_records_selection_and_full_details(
         assert media[0].title == first.stem
         assert media[0].path == str(first.resolve())
         assert first.read_bytes() == b"original media content"
-        assert window.original_filename.toPlainText() == LONG_NAME
+        assert window.file_details_dialog.filename.toPlainText() == LONG_NAME
     finally:
         window.quit()
         await qt_wait(qt_app, lambda: window._shutdown_complete)
 
 
-async def test_feature_play_targets_selected_file_without_changing_active_playback(qt_app, monkeypatch, tmp_path):
+async def test_dock_play_targets_selected_file_without_changing_active_playback(qt_app, monkeypatch, tmp_path):
     source = tmp_path / LONG_NAME
     source.touch()
     second = tmp_path / "Second.2026.1080p.WEB-DL.mkv"
@@ -80,16 +83,79 @@ async def test_feature_play_targets_selected_file_without_changing_active_playba
         monkeypatch.setattr(window.worker, "submit", lambda *args: calls.append(args))
         window.on_event("state", {"id": first_media.id, "playing": True, "position": 37, "duration": 100})
         window.queue.setCurrentRow(1)
-        window.feature_action.click()
+        window.play_button.click()
         assert calls == [("play", second_media.id)]
         assert window.current_id == first_media.id
         assert window.position == 37
         assert window.now.text() == "Spider-Man Brand New Day"
-        assert window.feature_title.text() == "Second"
-        assert window.feature_heading.text() == "SELECTED MEDIA"
+        window.show_file_details()
+        assert window.file_details_dialog.title.text() == "Second"
+        assert window.current_id == first_media.id
         window.queue.setCurrentRow(0)
         window.play_button.click()
         assert calls[-1] == ("command", "pause")
+    finally:
+        monkeypatch.setattr(window.worker, "submit", submit)
+        window.quit()
+        await qt_wait(qt_app, lambda: window._shutdown_complete)
+
+
+async def test_row_info_preserves_multiselection_and_active_playback(qt_app, monkeypatch, tmp_path):
+    sources = [tmp_path / LONG_NAME, tmp_path / "Second.2026.1080p.WEB-DL.mkv"]
+    for source in sources:
+        source.touch()
+    window = Window(tmp_path / "data", discover=False)
+    submit, calls = window.worker.submit, []
+    try:
+        await qt_wait(qt_app, lambda: window.worker.ready.is_set())
+        media = window.library.add([str(path) for path in sources])
+        window.refresh_library()
+        window.show()
+        qt_app.processEvents()
+        window.queue.item(1).setSelected(True)
+        selected = {item.data(256) for item in window.queue.selectedItems()}
+        window.on_event("state", {"id": media[0].id, "playing": True, "position": 37, "duration": 100})
+        monkeypatch.setattr(window.worker, "submit", lambda *args: calls.append(args))
+        info = PlaylistDelegate.info_rect(window.queue.visualItemRect(window.queue.item(1)))
+        QTest.mouseClick(window.queue.viewport(), Qt.MouseButton.LeftButton, pos=info.center())
+        assert window.file_details_dialog.isVisible()
+        assert window.file_details_dialog.filename.toPlainText() == sources[1].name
+        assert {item.data(256) for item in window.queue.selectedItems()} == selected
+        assert window.selected_id() == media[0].id
+        assert window.current_id == media[0].id and window.playing and window.position == 37
+        assert not calls
+    finally:
+        monkeypatch.setattr(window.worker, "submit", submit)
+        window.quit()
+        await qt_wait(qt_app, lambda: window._shutdown_complete)
+
+
+async def test_subtitle_popup_targets_selected_file_and_keeps_job_state(qt_app, monkeypatch, tmp_path):
+    sources = [tmp_path / "First.mp4", tmp_path / "Second.mp4"]
+    for source in sources:
+        source.touch()
+    window = Window(tmp_path / "data", discover=False)
+    submit, calls = window.worker.submit, []
+    try:
+        await qt_wait(qt_app, lambda: window.worker.ready.is_set())
+        first, second = window.library.add([str(path) for path in sources])
+        second.subtitles.append(Subtitle("second-subtitle", str(tmp_path / "second.srt"), "English"))
+        window.refresh_library()
+        monkeypatch.setattr(window.worker, "submit", lambda *args: calls.append(args))
+        window.on_event("state", {"id": first.id, "playing": True, "position": 37, "duration": 100})
+        window.queue.setCurrentRow(1)
+        window.captions_button.click()
+        assert window.subtitle_panel.isVisible()
+        assert window.subtitle_scope.text() == "For: Second"
+        assert not calls
+        window.subtitles.setCurrentIndex(1)
+        assert calls == [("subtitle", second.id, "second-subtitle")]
+        assert window.current_id == first.id and window.position == 37
+        window.on_event("subtitles.started", {})
+        window.queue.setCurrentRow(0)
+        assert not window.create_subtitles.isEnabled()
+        window.on_event("subtitles.finished", {})
+        assert window.create_subtitles.isEnabled()
     finally:
         monkeypatch.setattr(window.worker, "submit", submit)
         window.quit()
