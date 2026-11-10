@@ -17,13 +17,14 @@ import aiohttp
 import pychromecast
 from zeroconf import ServiceBrowser, ServiceListener, Zeroconf
 
-from .media import Preparation, playback_plan, probe
+from .media import Preparation, browser_video_mode, can_copy_stereo_audio, file_version, playback_plan, probe
 from .server import MediaServer
 from .security import LocalIdentity, ReceiverConnectionError, receiver_fingerprint
 from .pairing import PairedReceivers, PairingRequired, authenticate
 from .browser_bridge import BrowserBridge, BrowserCommandError
 from .managed_firefox import ManagedFirefox
 from .web_stream import checked_url
+from .watch import WatchServer
 
 RECEIVER_PING_INTERVAL = 10.0
 CAST_LOAD_TIMEOUT = 15.0
@@ -108,6 +109,10 @@ class Controller:
         self.emit = emit
         self.server = MediaServer()
         self.preparation = Preparation(cache)
+        self.watch = WatchServer()
+        self.watch_preparation = Preparation(cache / "watch")
+        self._watch_job: tuple[dict, asyncio.Task] | None = None
+        self._watch_closing = False
         self.session: aiohttp.ClientSession | None = None
         self.ws: aiohttp.ClientWebSocketResponse | None = None
         self.reader: asyncio.Task | None = None
@@ -301,6 +306,13 @@ class Controller:
         previous_paths = {m["id"]: m["path"] for m in self.playlist}
         prepared_files = dict(self.server.files)
         self.playlist = copy.deepcopy(items)
+        self.watch.sync(self.playlist)
+        if self._watch_job:
+            pending, task = self._watch_job
+            replacement = next((item for item in self.playlist if item["id"] == pending["id"]), None)
+            if replacement is None or replacement["path"] != pending["path"] or replacement["subtitles"] != pending["subtitles"]:
+                if not task.cancelling():
+                    task.cancel()
         self._subtitle_revisions = {m["id"]: self._subtitle_revisions.get(m["id"], 0) for m in self.playback_items()}
         self.server.files.clear()
         self.server.subtitles.clear()
@@ -513,17 +525,10 @@ class Controller:
             if asyncio.current_task() is self.play_task and generation == self._session_generation:
                 self.emit("status", {"message": "Ready", "busy": False})
 
-    async def prepared_url(self, item: dict, cast: bool) -> tuple[str, float]:
-        if item is self.web_item:
-            if not self.server.web.has(item["id"]):
-                raise ValueError("This Firefox session has ended. Send the video again from Firefox.")
-            self.mime_types[item["id"]] = item["mime_type"]
-            return self.server.url(local_address(self.device.host), item["id"]), item.get("duration", 0.0)
-        path = Path(item["path"])
+    async def probe_file(self, path: Path):
         if not path.is_file():
             raise ValueError(f"The original file is no longer available: {path.name}")
-        stat = path.stat()
-        key = (str(path), stat.st_size, stat.st_mtime_ns)
+        key = (path, file_version(path))
         info = self._probe_cache.get(key)
         if info is None:
             info = await probe(path)
@@ -531,6 +536,71 @@ class Controller:
             if len(self._probe_cache) > 256:
                 self._probe_cache.popitem(last=False)
         self._probe_cache.move_to_end(key)
+        return info
+
+    async def copy_watch_link(self, media_id: str, interface: str):
+        if self._watch_closing:
+            return
+        if self._watch_job:
+            self.emit("watch.error", {"message": "Lantern is already preparing a watch link."})
+            return
+        item = next((item for item in self.playlist if item["id"] == media_id), None)
+        if item is None:
+            self.emit("watch.error", {"message": "This movie is no longer in the playlist."})
+            self.emit("watch.finished", {"id": media_id})
+            return
+        self._watch_job = (item, asyncio.current_task())
+        try:
+            source = Path(item["path"])
+            if not source.is_file():
+                raise ValueError(f"The original file is no longer available: {source.name}")
+            version = file_version(source)
+            info = await self.probe_file(source)
+            if file_version(source) != version:
+                raise ValueError("The movie changed during inspection. Copy the watch link again.")
+            mode = browser_video_mode(info, source.suffix)
+            await self.watch.start(ipaddress.IPv4Interface(interface))
+            url = self.watch.existing_url(item, version)
+            if not url:
+                video = source
+                if mode != "direct":
+                    self.watch_preparation.pinned = {link.video for link in self.watch.links.values()}
+                    def report_progress(percent):
+                        self.emit("watch.progress", {"id": media_id, "percent": percent, "hdr": info.is_hdr})
+                    report_progress(0)
+                    video = await self.watch_preparation.prepare(
+                        source, info, report_progress,
+                        copy_audio=can_copy_stereo_audio(info), encode_video=mode == "video",
+                    )
+                if file_version(source) != version:
+                    raise ValueError("The movie changed during preparation. Copy the watch link again.")
+                url = self.watch.publish(copy.deepcopy(item), source, version, video)
+            self.emit("watch.ready", {"id": media_id, "url": url, "mode": mode})
+        except Exception as error:
+            logger.exception("Watch link preparation failed")
+            self.emit("watch.error", {"message": str(error)})
+        finally:
+            self._watch_job = None
+            self.emit("watch.finished", {"id": media_id})
+
+    async def revoke_watch_link(self, media_id: str):
+        revoked = self.watch.revoke(media_id)
+        if self._watch_job and self._watch_job[0]["id"] == media_id:
+            task = self._watch_job[1]
+            if not task.cancelling():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            revoked = True
+        self.emit("watch.revoked", {"revoked": revoked})
+
+    async def prepared_url(self, item: dict, cast: bool) -> tuple[str, float]:
+        if item is self.web_item:
+            if not self.server.web.has(item["id"]):
+                raise ValueError("This Firefox session has ended. Send the video again from Firefox.")
+            self.mime_types[item["id"]] = item["mime_type"]
+            return self.server.url(local_address(self.device.host), item["id"]), item.get("duration", 0.0)
+        path = Path(item["path"])
+        info = await self.probe_file(path)
         plan = playback_plan(info, cast, self.audio_mimes, path.suffix)
         self.mime_types[item["id"]] = plan.mime_type
         if plan.mode != "direct":
@@ -829,11 +899,21 @@ class Controller:
             self.emit("disconnected", {})
 
     async def close(self):
+        self._watch_closing = True
+        if self._watch_job:
+            task = self._watch_job[1]
+            if not task.cancelling():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         try:
+            await self.watch.close()
+            await self.watch_preparation.cleanup_async()
             await self.link_browser.close()
             await self.browser_bridge.close()
-            await self.disconnect()
         finally:
-            if self.session:
-                await self.session.close()
-            await self.server.stop()
+            try:
+                await self.disconnect()
+            finally:
+                if self.session:
+                    await self.session.close()
+                await self.server.stop()

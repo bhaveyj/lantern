@@ -1,20 +1,67 @@
 import asyncio
 import os
 import threading
+from types import SimpleNamespace
 
 import aiohttp
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QTimer, Qt
+from PySide6.QtNetwork import QHostAddress, QNetworkAddressEntry, QNetworkInterface
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from lantern.app import PlaylistDelegate, Window, Worker
+from lantern import app, controller, watch
 from lantern.library import Library, Subtitle, scan_files
+from lantern.media import Probe
 from lantern.subtitle_dialog import SubtitleDialog
 
 LONG_NAME = "Spider-Man.Brand.New.Day.2026.IMAX.2160p.CORE.WEB-DL.DDP5.1.Atmos.HDR.H.265-NotSoNewDayForSony.mkv"
+
+
+async def test_playlist_watch_button_copies_a_working_link_without_a_tv(qt_app, monkeypatch, tmp_path):
+    source = tmp_path / "Movie.mp4"
+    source.write_bytes(b"original video bytes")
+    entry = QNetworkAddressEntry()
+    entry.setIp(QHostAddress("127.0.0.1"))
+    entry.setPrefixLength(24)
+    adapter = SimpleNamespace(
+        flags=lambda: QNetworkInterface.InterfaceFlag.IsUp,
+        addressEntries=lambda: [entry],
+        humanReadableName=lambda: "Test network",
+    )
+    monkeypatch.setattr(QNetworkInterface, "allInterfaces", lambda: [adapter])
+    monkeypatch.setattr(app, "lan_ipv4", lambda address: address.is_loopback)
+    monkeypatch.setattr(watch, "lan_ipv4", lambda address: address.is_loopback)
+
+    async def probe_movie(_):
+        return Probe("h264", None, 1, "mov,mp4", pixel_format="yuv420p")
+
+    monkeypatch.setattr(controller, "probe", probe_movie)
+    window = Window(tmp_path / "data", discover=False)
+    try:
+        assert not window.copy_watch_button.isEnabled()
+        window.library.add([str(source)])
+        window.refresh_library()
+        window.sync_library()
+        assert window.copy_watch_button.isEnabled()
+        window.copy_watch_button.click()
+        assert not window.copy_watch_button.isEnabled()
+        await qt_wait(qt_app, lambda: window.watch_pending_id is None)
+        assert window.copy_watch_button.isEnabled()
+        url = QApplication.clipboard().text()
+        assert url.startswith("http://127.0.0.1:") and "/watch/" in url
+        async with aiohttp.ClientSession() as client:
+            async with client.get(url + "/video") as response:
+                assert await response.read() == source.read_bytes()
+            window.revoke_watch_action.trigger()
+            await qt_wait(qt_app, lambda: window.status.text() == "Watch link revoked")
+            assert (await client.get(url)).status == 404
+    finally:
+        window.quit()
+        await qt_wait(qt_app, lambda: window._shutdown_complete)
 
 
 async def test_connect_asks_for_code_only_when_worker_requests_it(qt_app, monkeypatch, tmp_path):
