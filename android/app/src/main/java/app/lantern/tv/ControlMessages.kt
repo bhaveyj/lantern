@@ -25,6 +25,7 @@ object ControlMessages {
     }
 
     private fun validateItem(item: JSONObject, peer: MediaPeer) {
+        PlaybackMetadata.from(item)
         ControlLimits.text(item.getString("id"), 256)
         ControlLimits.text(item.getString("title"))
         ControlLimits.url(item.getString("url"))

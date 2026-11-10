@@ -58,6 +58,7 @@ class TlsControlServerTest {
                     WebSocketFrame(WebSocketFrame.OpCode.Text, true, message, byteArrayOf(1, 2, 3, 4)).write(output)
                 }, { JSONObject(WebSocketFrame.read(input).textPayload) }, mediaIdentity = pin)
                 assertEquals("pair.ok", result.ack.getString("type"))
+                assertEquals(1, result.ack.getInt("webStreamVersion"))
                 assertEquals(trusted, server.mediaPeer)
             }
             Socket("127.0.0.1", server.listeningPort).use { socket ->

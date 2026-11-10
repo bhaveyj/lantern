@@ -36,7 +36,7 @@ object ControlLimits {
 
     fun command(action: String, value: Any?) {
         when (action) {
-            "play", "pause", "stop", "next", "previous" -> Unit
+            "play", "pause", "stop", "next", "previous", "live" -> Unit
             "seek", "volume" -> {
                 require(value is Number) { "Invalid numeric value" }
                 val number = value.toDouble()

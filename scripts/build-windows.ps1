@@ -25,6 +25,19 @@ Get-ChildItem .venv/Lib/site-packages/PySide6 -File | Where-Object { $_.Name -ma
 Copy-Item -LiteralPath README.md -Destination dist/Lantern/README.md
 Copy-Item -LiteralPath THIRD_PARTY.md -Destination dist/Lantern/THIRD_PARTY.md
 Copy-Item -LiteralPath LICENSE -Destination dist/Lantern/LICENSE
+& (Join-Path $PSScriptRoot 'build-firefox-extension.ps1') -NativeHelper
+if ($Release) { Set-LanternReleaseSignature (Join-Path $projectRoot 'dist/LanternFirefoxBridge.exe') }
+Copy-Item -LiteralPath 'dist/LanternFirefoxBridge.exe' -Destination 'dist/Lantern/LanternFirefoxBridge.exe'
+$extensionVersion = (Get-Content -LiteralPath 'extension/firefox/manifest.json' -Raw | ConvertFrom-Json).version
+$extensionPackage = "Lantern-Firefox-$extensionVersion.xpi"
+Copy-Item -LiteralPath (Join-Path 'dist' $extensionPackage) -Destination (Join-Path 'dist/Lantern' $extensionPackage)
+New-Item -ItemType Directory -Force 'dist/Lantern/scripts', 'dist/Lantern/docs', 'dist/Lantern/extension/firefox' | Out-Null
+Copy-Item -LiteralPath 'scripts/install-firefox-bridge.ps1' -Destination 'dist/Lantern/scripts/install-firefox-bridge.ps1'
+Copy-Item -LiteralPath 'docs/web-streaming.md' -Destination 'dist/Lantern/docs/web-streaming.md'
+Copy-Item -LiteralPath 'docs/development.md', 'docs/media.md', 'docs/security.md', 'docs/protocol.md', 'docs/testing.md' -Destination 'dist/Lantern/docs'
+foreach ($name in @('manifest.json', 'core.js', 'background.js', 'content.js', 'popup.html', 'popup.css', 'popup.js', 'managed.js')) {
+    Copy-Item -LiteralPath (Join-Path 'extension/firefox' $name) -Destination (Join-Path 'dist/Lantern/extension/firefox' $name)
+}
 if (Test-Path '.tools/inno/ISCC.exe') {
     & '.tools/inno/ISCC.exe' scripts/lantern.iss
     if ($LASTEXITCODE) { throw 'Windows installer compilation failed.' }
