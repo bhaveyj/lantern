@@ -23,12 +23,15 @@ from aiohttp import web
 from aiohttp.abc import AbstractResolver
 from yarl import URL
 
+from .media import decode_subtitle, srt_to_vtt
 from .stream_transport import MAX_WRAPPED_INPUT, TransportDecodeError, looks_wrapped_segment, unwrap_segment
 
 HLS_MIME = "application/vnd.apple.mpegurl"
 HLS_TYPES = {HLS_MIME, "application/x-mpegurl", "audio/mpegurl", "audio/x-mpegurl"}
 MP4_TYPES = {"video/mp4", "audio/mp4"}
 MAX_MANIFEST = 2 * 1024 * 1024
+MAX_SUBTITLE = 2 * 1024 * 1024
+MAX_SUBTITLE_TRACKS = 32
 MAX_RESOURCES = 16384
 MAX_SESSIONS = 4
 MAX_SEGMENT = 128 * 1024 * 1024
@@ -40,6 +43,7 @@ IDENTIFIER = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 URI_ATTRIBUTE = re.compile(r'(?P<prefix>(?:^|,)(?:URI|SERVER-URI)=)"(?P<uri>[^"\r\n]*)"')
 ATTRIBUTE = re.compile(r'(?:^|,)([A-Z0-9-]+)=("[^"\r\n]*"|[^,\r\n]*)')
 VARIABLE = re.compile(r"\{\$([A-Za-z0-9_-]+)\}")
+SRT_CUE = re.compile(r"^\d{2,}:\d{2}:\d{2},\d{3}[ \t]+-->[ \t]+\d{2,}:\d{2}:\d{2},\d{3}", re.MULTILINE)
 
 
 class WebStreamError(ValueError):
@@ -125,6 +129,12 @@ def checked_headers(value: object) -> dict[str, dict[str, str]]:
     return result
 
 
+@dataclass(frozen=True)
+class WebSubtitle:
+    url: str = field(repr=False)
+    label: str
+
+
 @dataclass
 class WebStream:
     id: str
@@ -136,6 +146,10 @@ class WebStream:
     headers: dict[str, dict[str, str]] = field(default_factory=dict, repr=False)
     root_headers: dict[str, str] | None = field(default=None, repr=False)
     prefer_compatible: bool = False
+    subtitles: dict[str, WebSubtitle] = field(default_factory=dict)
+
+    def subtitle_items(self) -> list[dict[str, str]]:
+        return [{"id": track_id, "label": track.label} for track_id, track in self.subtitles.items()]
 
 
 @dataclass
@@ -203,6 +217,28 @@ class WebRelay:
             mime = ""  # Probe the response type; do not mistake a webpage for media.
         return address, session_id, title, mime, checked_headers(source.get("headersByOrigin"))
 
+    def _update_subtitles(self, stream: WebStream, value: object):
+        if not isinstance(value, list):
+            return
+        previous = {track.url: track_id for track_id, track in stream.subtitles.items()}
+        subtitles = {}
+        seen = set()
+        for candidate in value[:MAX_SUBTITLE_TRACKS]:
+            if not isinstance(candidate, dict):
+                continue
+            try:
+                address = checked_url(candidate.get("url"))
+            except WebStreamError:
+                continue
+            if address in seen:
+                continue
+            seen.add(address)
+            label = candidate.get("label")
+            label = "".join(c for c in label[:120] if c.isprintable()).strip() if isinstance(label, str) else ""
+            track_id = previous.get(address) or secrets.token_urlsafe(24)
+            subtitles[track_id] = WebSubtitle(address, label or f"Subtitle {len(subtitles) + 1}")
+        stream.subtitles = subtitles
+
     async def register(self, source: dict, media_id: str | None = None) -> WebStream:
         address, session_id, title, mime, headers = self._source(source)
         if len(self.streams) >= MAX_SESSIONS:
@@ -216,6 +252,7 @@ class WebRelay:
                            prefer_compatible=source.get("preferCompatible") is True)
         if "rootHeaders" in source:
             stream.root_headers = checked_headers({origin(address): source["rootHeaders"]})[origin(address)]
+        self._update_subtitles(stream, source.get("subtitles"))
         self.streams[session_id] = stream
         self._add_resource(stream, address, "manifest" if mime == HLS_MIME else "progressive", resource_id=media_id)
         task = asyncio.current_task()
@@ -252,6 +289,7 @@ class WebRelay:
         stream.headers = headers
         stream.root_headers = root_headers
         stream.title = title
+        self._update_subtitles(stream, source.get("subtitles"))
         return stream
 
     async def _fetch(self, stream: WebStream, address: str, extra_headers: dict | None = None):
@@ -286,31 +324,68 @@ class WebRelay:
                 raise
         raise WebStreamError("The video source redirected too many times.")
 
-    async def _read_manifest(self, response) -> str:
+    async def _read_text_body(self, response, limit: int, label: str) -> bytes:
         encoding = response.headers.get("Content-Encoding", "identity").lower()
         if encoding not in {"identity", "gzip", "deflate"}:
-            raise WebStreamError("The video playlist uses an unsupported encoding.")
+            raise WebStreamError(f"The {label} uses an unsupported encoding.")
         decoder = zlib.decompressobj(16 + zlib.MAX_WBITS if encoding == "gzip" else zlib.MAX_WBITS) if encoding != "identity" else None
         data = bytearray()
         received = 0
         try:
             async for chunk in response.content.iter_chunked(65536):
                 received += len(chunk)
-                if received > MAX_MANIFEST:
-                    raise WebStreamError("The video playlist is too large.")
-                data.extend(decoder.decompress(chunk, MAX_MANIFEST + 1 - len(data)) if decoder else chunk)
-                if len(data) > MAX_MANIFEST or (decoder and decoder.unconsumed_tail):
-                    raise WebStreamError("The video playlist is too large.")
+                if received > limit:
+                    raise WebStreamError(f"The {label} is too large.")
+                data.extend(decoder.decompress(chunk, limit + 1 - len(data)) if decoder else chunk)
+                if len(data) > limit or (decoder and decoder.unconsumed_tail):
+                    raise WebStreamError(f"The {label} is too large.")
             if decoder:
-                data.extend(decoder.flush(MAX_MANIFEST + 1 - len(data)))
-                if not decoder.eof or len(data) > MAX_MANIFEST:
-                    raise WebStreamError("The video playlist is invalid or too large.")
-            text = data.decode("utf-8-sig")
-        except (UnicodeError, zlib.error):
+                data.extend(decoder.flush(limit + 1 - len(data)))
+                if not decoder.eof or len(data) > limit:
+                    raise WebStreamError(f"The {label} is invalid or too large.")
+        except zlib.error:
+            raise WebStreamError(f"The {label} uses an invalid encoding.") from None
+        return bytes(data)
+
+    async def _read_manifest(self, response) -> str:
+        try:
+            text = (await self._read_text_body(response, MAX_MANIFEST, "video playlist")).decode("utf-8-sig")
+        except UnicodeError:
             raise WebStreamError("The video source did not return a valid HLS playlist.") from None
         if text.splitlines()[:1] != ["#EXTM3U"] or "\x00" in text:
             raise WebStreamError("The video source did not return a valid HLS playlist.")
         return text
+
+    async def serve_subtitle(self, track_id: str) -> web.Response:
+        stream = next((stream for stream in self.streams.values() if track_id in stream.subtitles), None)
+        if stream is None:
+            raise web.HTTPNotFound()
+        if len(self._tasks) >= 64:
+            raise web.HTTPServiceUnavailable()
+        track = stream.subtitles[track_id]
+        task = asyncio.current_task()
+        self._tasks.add(task)
+        try:
+            async with asyncio.timeout(15), self._semaphore:
+                response = await self._fetch(stream, track.url)
+                try:
+                    if response.status != 200:
+                        raise WebStreamError("The website did not return a complete subtitle.")
+                    text = decode_subtitle(await self._read_text_body(response, MAX_SUBTITLE, "subtitle")).lstrip()
+                finally:
+                    response.close()
+            self._active(stream)
+            if "\0" in text:
+                raise WebStreamError("The website did not return a supported subtitle.")
+            if not re.match(r"WEBVTT(?:[ \t\n]|$)", text):
+                if not SRT_CUE.search(text):
+                    raise WebStreamError("The website did not return a supported subtitle.")
+                text = srt_to_vtt(text)
+            return web.Response(text=text, content_type="text/vtt", headers={"Cache-Control": "no-store"})
+        except (WebStreamError, aiohttp.ClientError, OSError, TimeoutError, UnicodeError):
+            raise web.HTTPBadGateway(text="This website subtitle could not be loaded. Try another track.") from None
+        finally:
+            self._tasks.discard(task)
 
     async def _probe(self, stream: WebStream, resource: Resource, depth: int = 0):
         if depth > 4:

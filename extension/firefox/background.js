@@ -82,11 +82,14 @@ async function native(message) {
   }
 }
 function selectedSource(item, candidate, tab) {
+  const players = item.players.get(candidate.frameId) || [];
+  const player = players.reduce((best, next) => !best || Core.score(candidate, [next]) > Core.score(candidate, [best]) ? next : best, null);
   return {url: candidate.url, title: String(tab.title || "Firefox video").slice(0, 240), pageUrl: tab.url,
-    mimeType: candidate.mimeType, sessionId: active.sessionId, rootHeaders: candidate.headers, headersByOrigin: snapshot(item, candidate.frameId)};
+    mimeType: candidate.mimeType, sessionId: active.sessionId, rootHeaders: candidate.headers,
+    headersByOrigin: snapshot(item, candidate.frameId), subtitles: player?.subtitles || []};
 }
 function sourceFingerprint(source) {
-  return JSON.stringify({url: source.url, rootHeaders: source.rootHeaders, headers: source.headersByOrigin});
+  return JSON.stringify({url: source.url, rootHeaders: source.rootHeaders, headers: source.headersByOrigin, subtitles: source.subtitles});
 }
 async function restoreMute(selection) {
   if (!selection.mutedByUs || selection.wasMuted) return;
@@ -153,7 +156,8 @@ browser.webRequest.onHeadersReceived.addListener(details => {
   const mp4Fragment = mimeType === "video/mp4" && hlsFrame && details.type !== "media" && !directVideo;
   if (mp4Fragment) mimeType = null;
   const unsupported = Core.unsupportedType(details.url, contentType);
-  if (!mimeType && !mp4Fragment && !Core.isSegment(details.url, contentType) && !unsupported) return;
+  const subtitle = existing?.players.get(details.frameId)?.some(player => player.subtitles.some(track => track.url === details.url));
+  if (!mimeType && !mp4Fragment && !Core.isSegment(details.url, contentType) && !unsupported && !subtitle) return;
   const item = state(details.tabId);
   if (!item) return;
   if (request) rememberOrigin(item, details.url, request.headers, details.frameId);
@@ -186,7 +190,8 @@ browser.runtime.onMessage.addListener(async (message, sender) => {
     const dimension = value => typeof value === "number" && Number.isFinite(value) ? Math.min(8192, Math.max(0, value)) : 0;
     const players = Array.isArray(message.players) ? message.players.slice(0, 16).filter(player => player && typeof player === "object").map(player => ({
       src: typeof player.src === "string" ? player.src.slice(0, 8192) : "", playing: player.playing === true,
-      width: dimension(player.width), height: dimension(player.height), frameId: sender.frameId})) : [];
+      width: dimension(player.width), height: dimension(player.height), frameId: sender.frameId,
+      subtitles: Core.subtitleTracks(player.subtitles)})) : [];
     if (item.players.size >= 32 && !item.players.has(sender.frameId)) item.players.delete(item.players.keys().next().value);
     item.players.set(sender.frameId, players);
     const formats = Array.isArray(message.formats) ? message.formats.filter(value => ["flv", "dash", "http", "websocket", "webrtc"].includes(value)) : [];

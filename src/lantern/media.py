@@ -186,14 +186,21 @@ class Preparation:
             partial.unlink(missing_ok=True)
 
 
-def subtitle_vtt(path: Path) -> str:
-    data = path.read_bytes()
+def decode_subtitle(data: bytes) -> str:
     try:
         text = data.decode("utf-8-sig")
     except UnicodeDecodeError:
         text = data.decode("utf-16") if data.startswith((b"\xff\xfe", b"\xfe\xff")) else data.decode("cp1252")
-    text = text.replace("\r\n", "\n")
-    if path.suffix.lower() == ".vtt":
-        return text if text.lstrip().startswith("WEBVTT") else "WEBVTT\n\n" + text
+    return text.replace("\r\n", "\n")
+
+
+def srt_to_vtt(text: str) -> str:
     text = re.sub(r"(\d{2}:\d{2}:\d{2}),(\d{3})", r"\1.\2", text)
     return "WEBVTT\n\n" + text
+
+
+def subtitle_vtt(path: Path) -> str:
+    text = decode_subtitle(path.read_bytes())
+    if path.suffix.lower() == ".vtt":
+        return text if text.lstrip().startswith("WEBVTT") else "WEBVTT\n\n" + text
+    return srt_to_vtt(text)

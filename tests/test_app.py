@@ -202,6 +202,29 @@ async def test_browser_video_controls_do_not_require_a_file_selection(qt_app, mo
         await qt_wait(qt_app, lambda: window._shutdown_complete)
 
 
+async def test_browser_subtitles_use_web_session_instead_of_selected_file(qt_app, monkeypatch, tmp_path):
+    window = Window(tmp_path / "data", discover=False)
+    submit, calls = window.worker.submit, []
+    try:
+        await qt_wait(qt_app, lambda: window.worker.ready.is_set())
+        monkeypatch.setattr(window.worker, "submit", lambda *args: calls.append(args))
+        window.on_event("web.source", {"id": "web-video", "title": "Online movie",
+                                      "subtitles": [{"id": "english", "label": "English"}]})
+        assert window.captions_button.isEnabled()
+        assert not window.create_subtitles.isEnabled()
+        window.subtitles.setCurrentIndex(1)
+        assert calls == [("subtitle", "web-video", "english")]
+        window.on_event("state", {"id": "web-video", "subtitleId": None})
+        assert window.subtitles.currentIndex() == 0
+        assert len(calls) == 1
+        window.on_event("web.source", {})
+        assert not window.captions_button.isEnabled()
+    finally:
+        monkeypatch.setattr(window.worker, "submit", submit)
+        window.quit()
+        await qt_wait(qt_app, lambda: window._shutdown_complete)
+
+
 async def qt_wait(app, predicate):
     for _ in range(300):
         app.processEvents()

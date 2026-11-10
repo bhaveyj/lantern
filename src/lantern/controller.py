@@ -182,7 +182,7 @@ class Controller:
         return self.playlist + ([self.web_item] if self.web_item else [])
 
     def web_state(self) -> dict:
-        return {key: self.web_item[key] for key in ("id", "title", "live", "seekable")} if self.web_item else {}
+        return {key: self.web_item[key] for key in ("id", "title", "live", "seekable", "subtitles", "selected_subtitle")} if self.web_item else {}
 
     def browser_connected(self) -> bool:
         return bool(self.device and ((self.device.kind == "receiver" and self.ws is not None and not self.ws.closed) or (self.device.kind == "cast" and self.cast is not None)))
@@ -244,11 +244,20 @@ class Controller:
                     changed = source_key != self.web_item["source_key"]
                     self.web_item["source_key"] = source_key
                     self.web_item.update(live=stream.live)
+                    subtitles = stream.subtitle_items()
+                    tracks_changed = subtitles != self.web_item["subtitles"]
+                    if tracks_changed:
+                        self.web_item["subtitles"] = subtitles
+                        if self.web_item["selected_subtitle"] not in {sub["id"] for sub in subtitles}:
+                            self.web_item["selected_subtitle"] = None
+                            self._subtitle_revisions[stream.id] = self._subtitle_revisions.get(stream.id, 0) + 1
                     self.emit("web.source", self.web_state())
                     if changed:
                         # HLS players reload child playlists, not an already-loaded
                         # master. Reopen a renewed root so old child tokens retire.
                         await self._play(stream.id, 0 if stream.live else self.current_position, autoplay=self.playing)
+                    elif tracks_changed and self.device.kind == "receiver":
+                        await self.send({"type": "playlist.snapshot", "items": self.wire_playlist()})
                 return {"ok": True, "source": self.web_state()}
             finally:
                 self._playback_tasks.discard(task)
@@ -269,7 +278,7 @@ class Controller:
                 try:
                     stream = await self.server.web.register(source)
                     self._pending_web_session = None
-                    self.web_item = {"id": stream.id, "title": stream.title, "session_id": stream.session_id, "source_key": hashlib.sha256(source["url"].encode()).hexdigest(), "mime_type": stream.mime_type, "live": stream.live, "seekable": True, "duration": getattr(stream, "duration", 0.0), "subtitles": [], "selected_subtitle": None}
+                    self.web_item = {"id": stream.id, "title": stream.title, "session_id": stream.session_id, "source_key": hashlib.sha256(source["url"].encode()).hexdigest(), "mime_type": stream.mime_type, "live": stream.live, "seekable": True, "duration": getattr(stream, "duration", 0.0), "subtitles": stream.subtitle_items(), "selected_subtitle": None}
                     self.mime_types[stream.id] = stream.mime_type
                     self.emit("web.source", self.web_state())
                     await self.send({"type": "playlist.snapshot", "items": self.wire_playlist()})
@@ -292,7 +301,7 @@ class Controller:
         previous_paths = {m["id"]: m["path"] for m in self.playlist}
         prepared_files = dict(self.server.files)
         self.playlist = copy.deepcopy(items)
-        self._subtitle_revisions = {m["id"]: self._subtitle_revisions.get(m["id"], 0) for m in self.playlist}
+        self._subtitle_revisions = {m["id"]: self._subtitle_revisions.get(m["id"], 0) for m in self.playback_items()}
         self.server.files.clear()
         self.server.subtitles.clear()
         for item in self.playlist:
@@ -716,15 +725,20 @@ class Controller:
             await self._subtitle(media_id, subtitle_id)
 
     async def _subtitle(self, media_id: str, subtitle_id: str | None):
-        item = next(m for m in self.playlist if m["id"] == media_id)
+        item = next((m for m in self.playback_items() if m["id"] == media_id), None)
+        if item is None:
+            raise ValueError("This video is no longer available.")
         if subtitle_id is not None and subtitle_id not in {s["id"] for s in item["subtitles"]}:
             raise ValueError("This subtitle is no longer in the playlist.")
         item["selected_subtitle"] = subtitle_id
         revision = self._subtitle_revisions[media_id] = self._subtitle_revisions.get(media_id, 0) + 1
         if self.device and self.device.kind == "receiver":
-            await self.send({"type": "playlist.snapshot", "items": self.wire_playlist()})
+            if item is not self.web_item:
+                await self.send({"type": "playlist.snapshot", "items": self.wire_playlist()})
             if self.current_id == media_id:
                 await self.send({"type": "playback.command", "action": "subtitle", "value": subtitle_id, "revision": revision})
+        elif item is self.web_item and self.current_id == media_id and self.cast:
+            await self._play(media_id, 0 if item["live"] else self.current_position, autoplay=self.playing)
         elif self.current_id == media_id:
             self.emit("notice", {"message": "The subtitle selection will apply when you play this video again in Cast mode."})
 
@@ -747,6 +761,7 @@ class Controller:
             self.server.reset()
             if self.web_item:
                 self.mime_types.pop(self.web_item["id"], None)
+                self._subtitle_revisions.pop(self.web_item["id"], None)
             self.web_item = None
             self._pending_web_session = None
             self.emit("web.source", {})

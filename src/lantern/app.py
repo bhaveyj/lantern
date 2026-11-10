@@ -611,7 +611,7 @@ class Window(QMainWindow):
 
         tools = QHBoxLayout()
         tools.setSpacing(2)
-        self.captions_button = self.icon_button("captions", "Subtitles for selected file")
+        self.captions_button = self.icon_button("captions", "Subtitles")
         self.captions_button.setCheckable(True)
         tools.addWidget(self.captions_button)
         self.volume_button = self.icon_button("volume", "Volume")
@@ -645,7 +645,7 @@ class Window(QMainWindow):
         self.subtitle_scope.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         subs.addWidget(self.subtitle_scope)
         self.subtitles = QComboBox()
-        self.subtitles.setAccessibleName("Subtitle track for selected file")
+        self.subtitles.setAccessibleName("Subtitle track")
         self.subtitles.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.subtitles.setMinimumContentsLength(12)
         self.subtitles.currentIndexChanged.connect(self.subtitle_changed)
@@ -841,30 +841,48 @@ class Window(QMainWindow):
         self.sync_library()
 
     def selection_changed(self, *args):
-        self.rendering = True
-        self.subtitles.clear()
-        self.subtitles.addItem("Off", None)
-        media_id = self.selected_id()
-        if media_id:
-            media = self.library.get(media_id)
-            for subtitle in media.subtitles:
-                self.subtitles.addItem(subtitle.label, subtitle.id)
-            index = self.subtitles.findData(media.selected_subtitle)
-            self.subtitles.setCurrentIndex(max(0, index))
-        self.rendering = False
-        title = describe_media(media.path, media.title).title if media_id else "No file selected"
-        self.subtitle_scope.setText("For: " + title)
-        self.subtitle_scope.setToolTip(title)
-        self.captions_button.setEnabled(bool(media_id))
-        self.choose_subtitles.setEnabled(bool(media_id))
-        self.create_subtitles.setEnabled(bool(media_id) and not self.subtitle_busy)
-        if not media_id:
-            self.subtitle_panel.hide()
+        self.refresh_subtitle_menu()
         self.update_selection_summary()
         self.update_player()
 
+    def refresh_subtitle_menu(self):
+        media_id = self.selected_id()
+        if self.web_source:
+            title = self.web_source["title"]
+            tracks = [(sub["label"], sub["id"]) for sub in self.web_source.get("subtitles", [])]
+            selected = self.web_source.get("selected_subtitle")
+        elif media_id:
+            media = self.library.get(media_id)
+            title = describe_media(media.path, media.title).title
+            tracks = [(sub.label, sub.id) for sub in media.subtitles]
+            selected = media.selected_subtitle
+        else:
+            title, tracks, selected = "No file selected", [], None
+        with QSignalBlocker(self.subtitles):
+            self.subtitles.clear()
+            self.subtitles.addItem("Off", None)
+            for label, track_id in tracks:
+                self.subtitles.addItem(label, track_id)
+            self.subtitles.setCurrentIndex(max(0, self.subtitles.findData(selected)))
+        self.subtitle_scope.setText("For: " + title)
+        self.subtitle_scope.setToolTip(title)
+        available = bool(tracks) if self.web_source else bool(media_id)
+        file_actions = bool(media_id and not self.web_source)
+        self.captions_button.setEnabled(available)
+        self.choose_subtitles.setEnabled(file_actions)
+        self.create_subtitles.setEnabled(file_actions and not self.subtitle_busy)
+        if not available:
+            self.subtitle_panel.hide()
+
     def subtitle_changed(self, *args):
-        if self.rendering or not self.selected_id():
+        if self.rendering:
+            return
+        if self.web_source:
+            selected = self.subtitles.currentData()
+            self.web_source["selected_subtitle"] = selected
+            self.worker.submit("subtitle", self.web_source["id"], selected)
+            return
+        if not self.selected_id():
             return
         media = self.library.get(self.selected_id())
         media.selected_subtitle = self.subtitles.currentData()
@@ -1067,12 +1085,13 @@ class Window(QMainWindow):
                 self.show_error(data["message"])
             elif event == "subtitles.finished":
                 self.subtitle_busy = False
-                self.create_subtitles.setEnabled(bool(self.selected_id()))
+                self.create_subtitles.setEnabled(bool(self.selected_id()) and not self.web_source)
                 self.subtitle_activity.hide()
             self.sleep_hold()
             return
         if event == "web.source":
             self.web_source = data
+            self.refresh_subtitle_menu()
             if data:
                 self.now.setText(data["title"])
                 self.status.setText("Video link playing")
@@ -1140,6 +1159,10 @@ class Window(QMainWindow):
             self.seekable = data.get("seekable", not self.live)
             self.go_live.setVisible(self.live)
             self.seek.setEnabled(self.seekable and self.duration > 0)
+            if self.web_source and self.current_id == self.web_source["id"] and "subtitleId" in data:
+                if self.web_source.get("selected_subtitle") != data["subtitleId"]:
+                    self.web_source["selected_subtitle"] = data["subtitleId"]
+                    self.refresh_subtitle_menu()
             media = next((m for m in self.library.items if m.id == self.current_id), None)
             if media and "subtitleId" in data and media.selected_subtitle != data["subtitleId"]:
                 media.selected_subtitle = data["subtitleId"]
