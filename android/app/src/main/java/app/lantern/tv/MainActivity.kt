@@ -61,13 +61,22 @@ class MainActivity : Activity() {
     private lateinit var root: FrameLayout
     private lateinit var welcome: LinearLayout
     private lateinit var pinView: TextView
+    private lateinit var pinExpiryView: TextView
+    private lateinit var pairingInstruction: TextView
+    private lateinit var pairingHeading: TextView
+    private lateinit var pairingHint: TextView
+    private lateinit var readyView: TextView
     private lateinit var connectionView: TextView
     private lateinit var welcomeBrowse: Button
+    private lateinit var pairedComputersButton: Button
     private lateinit var controls: LinearLayout
     private lateinit var timeline: SeekBar
     private lateinit var times: TextView
     private lateinit var titleView: TextView
     private lateinit var playButton: Button
+    private lateinit var liveButton: Button
+    private lateinit var backButton: Button
+    private lateinit var forwardButton: Button
     private var drawer: View? = null
     private var items = listOf<JSONObject>()
     private var current: JSONObject? = null
@@ -82,13 +91,14 @@ class MainActivity : Activity() {
     private var connected = false
     private var destroyed = false
     private var captionFontScale = 1f
+    private var liveRecoveryAttempts = 0
     private val bg = TvTheme.background
     private val ink = TvTheme.text
     private val accent = TvTheme.blue
 
     private val ticker = object : Runnable {
         override fun run() {
-            if (gate.refresh()) pinView.text = gate.pin.chunked(3).joinToString("  ")
+            updatePairingCode()
             updateState()
             handler.postDelayed(this, 1000)
         }
@@ -121,8 +131,17 @@ class MainActivity : Activity() {
                 if (state == Player.STATE_ENDED) requestAdjacent(1)
             }
             override fun onPlayerError(error: PlaybackException) {
+                if (error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW && isLive() && liveRecoveryAttempts < 2) {
+                    // A paused DVR window may move beyond our position. Recover only
+                    // this specific condition, with a finite retry budget per load.
+                    liveRecoveryAttempts++
+                    player.seekToDefaultPosition()
+                    player.prepare()
+                    return
+                }
                 showControls()
                 val explanation = when (error.errorCode) {
+                    PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW -> "The live window moved past this playback position. Choose Go live to resume."
                     in 2000..2999 -> "The TV could not read the stream from your PC. Keep Lantern open and check the home network connection."
                     PlaybackException.ERROR_CODE_DECODING_FAILED -> "The TV's decoder failed. Close other TV video apps or restart the TV, then try again."
                     in 3000..4999 -> "The TV could not decode this file. Check that its container, video and audio are supported."
@@ -141,8 +160,16 @@ class MainActivity : Activity() {
         } }, { name -> handler.post {
             if (destroyed) return@post
             connected = name != null
+            if (!connected) updatePairingCode()
+            pinView.visibility = if (connected) View.GONE else View.VISIBLE
+            pinExpiryView.visibility = if (connected) View.GONE else View.VISIBLE
+            readyView.visibility = if (connected) View.VISIBLE else View.GONE
+            pairingHeading.text = if (connected) "CONNECTED" else "PAIR YOUR TV"
+            pairingInstruction.text = if (connected) "Play a file on your PC, or send a video from Firefox." else "Enter the code below in Lantern on your Windows PC."
+            pairingHint.text = if (connected) "Your PC is remembered. No code is needed to reconnect." else "Your PC will be remembered after pairing."
+            if (connected) { pinView.text = ""; pinExpiryView.text = "" }
             welcomeBrowse.visibility = if (connected) View.VISIBLE else View.GONE
-            if (connected) welcomeBrowse.requestFocus()
+            if (connected && welcome.visibility == View.VISIBLE) welcomeBrowse.requestFocus()
             connectionView.text = if (name == null) "Open Lantern on Windows to connect." else "Connected to $name · choose a file on your PC"
             if (name == null) {
                 player.stop()
@@ -151,6 +178,7 @@ class MainActivity : Activity() {
                 welcome.visibility = View.VISIBLE
                 setControlsVisible(false)
                 drawer?.let { root.removeView(it) }; drawer = null
+                pairedComputersButton.requestFocus()
             }
         } }, clients = pairedClients, receiverFingerprint = identity.fingerprint)
         try {
@@ -170,6 +198,14 @@ class MainActivity : Activity() {
         setPadding(dp(8), dp(6), dp(8), dp(6))
     }
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
+    private fun updatePairingCode() {
+        if (connected) return
+        val state = gate.displayState()
+        pinView.text = state.pin.chunked(3).joinToString("  ")
+        val minutes = state.remainingSeconds / 60
+        val seconds = (state.remainingSeconds % 60).toString().padStart(2, '0')
+        pinExpiryView.text = "New code in $minutes:$seconds"
+    }
     private fun shape(color: Int, stroke: Int = TvTheme.border, radius: Int = 14, width: Int = 1) = GradientDrawable().apply {
         setColor(color)
         cornerRadius = dp(radius).toFloat()
@@ -221,12 +257,20 @@ class MainActivity : Activity() {
         val pairing = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER }
         val compact = resources.configuration.screenHeightDp < 600
         pairing.addView(text("Your library. Bigger screen.", if (compact) 28f else 32f).apply { typeface = Typeface.DEFAULT_BOLD })
-        pairing.addView(text("Enter the code below in Lantern on your Windows PC.", 15f, TvTheme.muted))
+        pairingInstruction = text("Enter the code below in Lantern on your Windows PC.", 15f, TvTheme.muted)
+        pairing.addView(pairingInstruction)
         val codeCard = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(dp(22), dp(16), dp(22), dp(16)); background = shape(TvTheme.surface, radius = 18) }
-        codeCard.addView(text("PAIR YOUR TV", 11f, accent).apply { typeface = Typeface.DEFAULT_BOLD; letterSpacing = 0.12f })
-        pinView = text(gate.pin.chunked(3).joinToString("  "), if (compact) 60f else 68f, accent).apply { typeface = Typeface.MONOSPACE; setPadding(0, dp(6), 0, dp(6)) }
+        pairingHeading = text("PAIR YOUR TV", 11f, accent).apply { typeface = Typeface.DEFAULT_BOLD; letterSpacing = 0.12f }
+        codeCard.addView(pairingHeading)
+        pinView = text("", if (compact) 60f else 68f, accent).apply { typeface = Typeface.MONOSPACE; setPadding(0, dp(6), 0, dp(6)) }
         codeCard.addView(pinView)
-        codeCard.addView(text("Your PC will be remembered after pairing.", 13f, TvTheme.muted))
+        pinExpiryView = text("", 13f, TvTheme.muted).apply { typeface = Typeface.MONOSPACE }
+        codeCard.addView(pinExpiryView)
+        readyView = text("Ready to watch", if (compact) 30f else 34f, accent).apply { typeface = Typeface.DEFAULT_BOLD; setPadding(0, dp(16), 0, dp(16)); visibility = View.GONE }
+        codeCard.addView(readyView)
+        updatePairingCode()
+        pairingHint = text("Your PC will be remembered after pairing.", 13f, TvTheme.muted)
+        codeCard.addView(pairingHint)
         connectionView = text("Ready to connect to your laptop.", 14f, TvTheme.muted)
         codeCard.addView(connectionView)
         welcomeBrowse = button("Browse your playlist", primary = true) { showPlaylist() }.apply { visibility = View.GONE; textSize = 16f }
@@ -234,12 +278,13 @@ class MainActivity : Activity() {
         pairing.addView(codeCard, LinearLayout.LayoutParams(dp(520), -2).apply { topMargin = dp(16) })
         welcome.addView(pairing, LinearLayout.LayoutParams(-1, 0, 1f))
         val settings = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
-        settings.addView(button("Paired computers") { showPairedComputers() })
+        pairedComputersButton = button("Paired computers") { showPairedComputers() }
+        settings.addView(pairedComputersButton, LinearLayout.LayoutParams(-2, dp(48)).apply { marginEnd = dp(16) })
         settings.addView(button("Connection details") {
             AlertDialog.Builder(this).setTitle("Connection details")
                 .setMessage("Encrypted connection\n\nSHA-256 TV identity:\n" + identity.fingerprint.chunked(4).chunked(8).joinToString("\n") { it.joinToString(" ") })
                 .setPositiveButton("Close", null).show()
-        })
+        }, LinearLayout.LayoutParams(-2, dp(48)))
         welcome.addView(settings)
         welcome.addView(text("Same home network  ·  Connect by IP: ${ipAddress()}:8765", 13f, TvTheme.muted))
         root.addView(welcome, FrameLayout.LayoutParams(-1, -1))
@@ -257,20 +302,24 @@ class MainActivity : Activity() {
             keyProgressIncrement = 10
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onStartTrackingTouch(seekBar: SeekBar) { changingSeek = true }
-                override fun onStopTrackingTouch(seekBar: SeekBar) { player.seekTo(player.duration.coerceAtLeast(0) * seekBar.progress / 1000); changingSeek = false; scheduleHide() }
-                override fun onProgressChanged(seekBar: SeekBar, value: Int, fromUser: Boolean) { if (fromUser && !changingSeek) player.seekTo(player.duration.coerceAtLeast(0) * value / 1000) }
+                override fun onStopTrackingTouch(seekBar: SeekBar) { seekProgress(seekBar.progress); changingSeek = false; scheduleHide() }
+                override fun onProgressChanged(seekBar: SeekBar, value: Int, fromUser: Boolean) { if (fromUser && !changingSeek) seekProgress(value) }
             })
         }
         timelineRow.addView(timeline, LinearLayout.LayoutParams(0, dp(40), 1f))
         times = text("0:00 / 0:00", 13f, TvTheme.muted)
         timelineRow.addView(times)
+        liveButton = button("Go live") { goLive() }.apply { visibility = View.GONE; textSize = 13f }
+        timelineRow.addView(liveButton, LinearLayout.LayoutParams(-2, dp(40)))
         controls.addView(timelineRow)
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
         row.addView(button("Previous") { requestAdjacent(-1) })
-        row.addView(button("−10s") { player.seekTo((player.currentPosition - 10000).coerceAtLeast(0)) })
+        backButton = button("−10s") { seekPosition(player.currentPosition - 10000) }
+        row.addView(backButton)
         playButton = button("Pause", primary = true) { if (player.isPlaying) player.pause() else resumePlayback() }
         row.addView(playButton)
-        row.addView(button("+10s") { player.seekTo(player.currentPosition + 10000) })
+        forwardButton = button("+10s") { seekPosition(player.currentPosition + 10000) }
+        row.addView(forwardButton)
         row.addView(button("Next") { requestAdjacent(1) })
         row.addView(button("Playlist") { showPlaylist() })
         row.addView(button("CC") { showSubtitles() })
@@ -291,7 +340,7 @@ class MainActivity : Activity() {
                 val updated = items.firstOrNull { it.optString("id") == previous?.optString("id") }
                 if (previous != null && updated != null) {
                     val tracksChanged = previous.optJSONArray("subtitles")?.toString() != updated.optJSONArray("subtitles")?.toString()
-                    current = JSONObject(updated.toString()).put("url", previous.getString("url"))
+                    current = PlaybackMetadata.mergePlaying(previous, updated)
                     subtitleSelection.accept(updated.subtitleId(), updated.optLong("subtitleRevision", 0))
                     if (tracksChanged) {
                         // Media3 treats replaceMediaItem as a metadata update for the
@@ -304,7 +353,6 @@ class MainActivity : Activity() {
                     }
                     applySubtitle()
                 }
-                if (current == null) connectionView.text = "${items.size} files ready · start playback from Windows"
                 if (drawer != null) showPlaylist()
             }
             "playback.load" -> load(message.getJSONObject("item"))
@@ -312,7 +360,8 @@ class MainActivity : Activity() {
                 "play" -> resumePlayback()
                 "pause" -> { player.pause(); showControls() }
                 "stop" -> { player.stop(); current = null; welcome.visibility = View.VISIBLE; setControlsVisible(false) }
-                "seek" -> player.seekTo((message.optDouble("value", 0.0).coerceAtLeast(0.0) * 1000).toLong())
+                "seek" -> seekPosition((message.optDouble("value", 0.0).coerceAtLeast(0.0) * 1000).toLong())
+                "live" -> goLive()
                 "volume" -> player.volume = message.optDouble("value", 0.8).toFloat().coerceIn(0f, 1f)
                 "next" -> requestAdjacent(1)
                 "previous" -> requestAdjacent(-1)
@@ -328,8 +377,11 @@ class MainActivity : Activity() {
 
     private fun load(item: JSONObject) {
         current = item
+        liveRecoveryAttempts = 0
         subtitleSelection.reset(item.subtitleId(), item.optLong("subtitleRevision", 0))
-        player.setMediaItem(mediaItem(item), (item.optDouble("position", 0.0).coerceAtLeast(0.0) * 1000).toLong())
+        // A live playlist starts at its moving default position, not at DVR zero.
+        if (PlaybackMetadata.from(item).live) player.setMediaItem(mediaItem(item))
+        else player.setMediaItem(mediaItem(item), (item.optDouble("position", 0.0).coerceAtLeast(0.0) * 1000).toLong())
         player.playWhenReady = item.optBoolean("autoplay", true)
         player.prepare()
         titleView.text = item.getString("title")
@@ -346,7 +398,16 @@ class MainActivity : Activity() {
                 .setId(subtitle.getString("id")).setLabel(subtitle.getString("label"))
                 .setMimeType(MimeTypes.TEXT_VTT).setSelectionFlags(if (subtitle.getString("id") == selectedSubtitle) C.SELECTION_FLAG_DEFAULT else 0).build()
         }
-        return MediaItem.Builder().setMediaId(item.getString("id")).setUri(item.getString("url")).setSubtitleConfigurations(subtitles).build()
+        val metadata = PlaybackMetadata.from(item)
+        val builder = MediaItem.Builder().setMediaId(item.getString("id")).setUri(item.getString("url")).setSubtitleConfigurations(subtitles)
+        metadata.mimeType?.let { builder.setMimeType(it) }
+        if (metadata.live) {
+            // HlsMediaSource clamps this target to the available live window.
+            builder.setLiveConfiguration(MediaItem.LiveConfiguration.Builder()
+                .setTargetOffsetMs(PlaybackMetadata.LIVE_TARGET_OFFSET_MS)
+                .setMinPlaybackSpeed(0.98f).setMaxPlaybackSpeed(1.02f).build())
+        }
+        return builder.build()
     }
 
     private fun applySubtitle() {
@@ -429,11 +490,20 @@ class MainActivity : Activity() {
 
     private fun updateState() {
         if (!::server.isInitialized) return
-        val duration = player.duration.coerceAtLeast(0)
-        if (!changingSeek) timeline.progress = if (duration > 0) (player.currentPosition * 1000 / duration).toInt() else 0
-        times.text = "${time(player.currentPosition)} / ${time(duration)}"
+        val duration = PlaybackTimeline.duration(player.duration)
+        val live = isLive()
+        val seekable = isSeekable() && duration > 0
+        timeline.isEnabled = seekable
+        backButton.isEnabled = seekable
+        forwardButton.isEnabled = seekable
+        if (!changingSeek) timeline.progress = PlaybackTimeline.progress(player.currentPosition, duration)
+        liveButton.visibility = if (live) View.VISIBLE else View.GONE
+        times.text = if (live) {
+            val offset = player.currentLiveOffset
+            if (offset != C.TIME_UNSET && offset >= 0) "LIVE · −${time(offset)}" else "LIVE"
+        } else "${time(player.currentPosition)} / ${time(duration)}"
         playButton.text = if (player.isPlaying) "Pause" else "Play"
-        server.publish(JSONObject().put("type", "playback.state").put("id", current?.optString("id") ?: JSONObject.NULL).put("playing", player.isPlaying).put("position", player.currentPosition / 1000.0).put("duration", duration / 1000.0).put("subtitleId", selectedSubtitle ?: JSONObject.NULL).put("subtitleRevision", subtitleSelection.revision))
+        server.publish(JSONObject().put("type", "playback.state").put("id", current?.optString("id") ?: JSONObject.NULL).put("playing", player.isPlaying).put("position", player.currentPosition.coerceAtLeast(0) / 1000.0).put("duration", duration / 1000.0).put("live", live).put("seekable", seekable).put("subtitleId", selectedSubtitle ?: JSONObject.NULL).put("subtitleRevision", subtitleSelection.revision))
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
@@ -448,7 +518,7 @@ class MainActivity : Activity() {
                 KeyEvent.KEYCODE_MEDIA_NEXT -> { requestAdjacent(1); return true }
                 KeyEvent.KEYCODE_MEDIA_PREVIOUS -> { requestAdjacent(-1); return true }
                 KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT -> if (controls.visibility != View.VISIBLE && current != null) {
-                    player.seekTo((player.currentPosition + if (event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) 10000 else -10000).coerceAtLeast(0)); return true
+                    seekPosition(player.currentPosition + if (event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) 10000 else -10000); return true
                 }
                 KeyEvent.KEYCODE_MENU -> { showPlaylist(); return true }
             }
@@ -496,8 +566,31 @@ class MainActivity : Activity() {
     } catch (_: Exception) { "check TV network settings" }
 
     private fun resumePlayback() {
-        if (player.playbackState == Player.STATE_ENDED) player.seekTo(0)
+        if (isLive() && (player.playbackState == Player.STATE_ENDED || player.playerError?.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW)) {
+            goLive()
+        } else if (player.playbackState == Player.STATE_ENDED) player.seekTo(0)
         player.play()
+    }
+
+    private fun isLive(): Boolean = current != null && (current?.optBoolean("live", false) == true || player.isCurrentMediaItemLive)
+
+    private fun isSeekable(): Boolean = current != null && current?.optBoolean("seekable", true) == true && player.isCurrentMediaItemSeekable
+
+    private fun seekPosition(position: Long) {
+        PlaybackTimeline.position(position, player.duration, isSeekable())?.let { player.seekTo(it) }
+    }
+
+    private fun seekProgress(progress: Int) {
+        PlaybackTimeline.fromProgress(progress, player.duration, isSeekable())?.let { player.seekTo(it) }
+    }
+
+    private fun goLive() {
+        if (!isLive()) return
+        liveRecoveryAttempts = 0
+        player.seekToDefaultPosition()
+        if (player.playerError != null) player.prepare()
+        player.play()
+        showControls()
     }
 
     private fun time(ms: Long): String { val s = ms.coerceAtLeast(0) / 1000; return if (s >= 3600) "%d:%02d:%02d".format(s / 3600, s / 60 % 60, s % 60) else "%d:%02d".format(s / 60, s % 60) }

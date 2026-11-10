@@ -55,9 +55,9 @@ Optional Deepgram generation uses your own API key and uploads the selected audi
 
 Generated captions can contain errors. Translation, rolling live captions, and automatic OCR are not included. See the [subtitle guide](docs/media.md) for models, caption switching, and cloud settings.
 
-## Firefox streaming preview
+## Play a video link
 
-An optional companion for sending HLS live/on-demand streams and MP4 video from Firefox to your TV is in development. Its companion and relay implementation are not yet included in the published source.
+Connect your TV, choose **Paste video link**, and paste a public HTTPS video or watch-page link. Direct HLS and MP4 links play through Lantern. For a watch page, Lantern uses an installed Firefox in a private background session and sends the video to the TV when it detects a compatible stream.
 
 [Preview setup and limitations](docs/web-streaming.md)
 
@@ -81,7 +81,7 @@ Original media is never moved or rewritten. See the [security model](docs/securi
 
 - [Build and develop](docs/development.md): prerequisites, installation, packaging, release signing, and automated tests.
 - [Media and subtitles](docs/media.md): formats, preparation, caption tools, and local storage.
-- [Firefox streaming preview](docs/web-streaming.md): planned companion setup, supported sources, and current limitations; implementation is pending publication.
+- [Firefox streaming preview](docs/web-streaming.md): companion setup, supported sources, and current limitations.
 - [Network and security](docs/security.md): pairing, encryption, Cast, and media process restrictions.
 - [Receiver protocol](docs/protocol.md) and [device testing](docs/testing.md).
 
