@@ -92,6 +92,37 @@ hd.m3u8
         await relay.close()
 
 
+async def test_web_subtitles_are_fetched_lazily_and_revoked_with_session(monkeypatch):
+    root = "https://video.example/movie.mp4"
+    captions = "https://captions.example/english?key=private"
+    server = MediaServer()
+    upstream = fixture_relay(monkeypatch, server.web, {
+        root: {"headers": {"Content-Type": "video/mp4"}},
+        captions: {"body": gzip.compress(b"1\r\n00:00:02,000 --> 00:00:04,000\r\nHello\r\n"), "headers": {"Content-Encoding": "gzip"}},
+    })
+    await server.start()
+    try:
+        data = source(root, mimeType="video/mp4", headersByOrigin={"https://video.example": {"Cookie": "video=secret"}},
+                      subtitles=[{"url": "https://127.0.0.1/forbidden"}, {"url": captions, "label": "English"}])
+        stream = await server.web.register(data)
+        assert [address for address, _ in upstream.calls] == [root]
+        (track,) = stream.subtitle_items()
+        assert track["label"] == "English" and "private" not in str(track)
+        await server.web.refresh(data)
+        assert stream.subtitle_items() == [track]
+        url = server.subtitle_url("127.0.0.1", track["id"])
+        async with ClientSession() as client:
+            async with client.get(url) as response:
+                assert response.content_type == "text/vtt"
+                assert await response.text() == "WEBVTT\n\n1\n00:00:02.000 --> 00:00:04.000\nHello\n"
+            assert upstream.calls[-1] == (captions, {})
+            server.reset()
+            async with client.get(url) as response:
+                assert response.status == 404
+    finally:
+        await server.stop()
+
+
 @pytest.mark.parametrize("address", [
     "http://video.example/live.m3u8", "file:///movie.mp4", "https://127.0.0.1/x", "https://10.0.0.1/x",
     "https://169.254.169.254/x", "https://[::1]/x", "https://[fc00::1]/x", "https://224.0.0.1/x",

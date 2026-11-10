@@ -13,7 +13,8 @@ class Relay:
         self.stream = None
 
     async def register(self, source, media_id=None):
-        self.stream = SimpleNamespace(id="web-video", session_id=source["sessionId"], title=source["title"], mime_type="application/vnd.apple.mpegurl", live=True)
+        self.stream = SimpleNamespace(id="web-video", session_id=source["sessionId"], title=source["title"], mime_type="application/vnd.apple.mpegurl", live=True,
+                                      subtitle_items=lambda: source.get("test_subtitles", []))
         return self.stream
 
     async def refresh(self, source):
@@ -113,6 +114,26 @@ async def test_old_browser_tab_cannot_refresh_or_stop_current_video(tmp_path, mo
         assert [m["action"] for m in messages] == ["seek", "live"]
         reply = await controller.browser_message({"action": "stop", "source": source()})
         assert reply["stopped"]
+    finally:
+        await controller.close()
+
+
+async def test_browser_subtitle_selection_preserves_playback_and_survives_sync(tmp_path, monkeypatch):
+    controller, events, messages = await connected_controller(tmp_path, monkeypatch)
+    try:
+        track = {"id": "english-track", "label": "English"}
+        await controller.browser_message({"action": "play", "source": {**source(), "test_subtitles": [track]}})
+        item = next(message["item"] for message in messages if message["type"] == "playback.load")
+        assert item["subtitles"] == [{**track, "url": controller.server.subtitle_url("127.0.0.1", track["id"])}]
+        assert ("web.source", controller.web_state()) in events
+        messages.clear()
+        await controller.subtitle(item["id"], track["id"])
+        assert [message["type"] for message in messages] == ["playback.command"]
+        assert messages[0]["action"] == "subtitle"
+        assert messages[0]["value"] == track["id"]
+        await controller.sync([])
+        assert controller.wire_playlist()[0]["selectedSubtitle"] == track["id"]
+        assert controller.wire_playlist()[0]["subtitleRevision"] == 1
     finally:
         await controller.close()
 

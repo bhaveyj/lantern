@@ -105,8 +105,11 @@ class MediaServer:
 
     async def subtitle(self, request: web.Request):
         self.authorized(request)
-        path = self.subtitles.get(request.match_info["id"])
-        if path is None or not path.is_file():
+        track_id = request.match_info["id"]
+        path = self.subtitles.get(track_id)
+        if path is None:
+            return await self.web.serve_subtitle(track_id)
+        if not path.is_file():
             raise web.HTTPNotFound()
         async with self._subtitle_lock:
             converted = await self.converted_subtitle(request, path)

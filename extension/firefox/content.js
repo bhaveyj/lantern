@@ -20,7 +20,10 @@
     for (const video of Array.from(document.querySelectorAll("video")).slice(0, 16)) {
       const rect = video.getBoundingClientRect();
       const src = String(video.currentSrc || video.src || "").slice(0, 8192);
-      players.push({src, playing: !video.paused && !video.ended, width: Math.min(8192, Math.max(0, rect.width)), height: Math.min(8192, Math.max(0, rect.height))});
+      const subtitles = Core.subtitleTracks(Array.from(video.querySelectorAll("track[src]")).slice(0, 64)
+        .filter(track => ["subtitles", "captions"].includes(track.kind) && track.getAttribute("src"))
+        .map(track => ({url: track.src, label: track.label, language: track.srclang})));
+      players.push({src, subtitles, playing: !video.paused && !video.ended, width: Math.min(8192, Math.max(0, rect.width)), height: Math.min(8192, Math.max(0, rect.height))});
       collect(src, video.getAttribute("type"), "player");
       for (const source of Array.from(video.querySelectorAll("source[src]")).slice(0, 8)) collect(source.src, source.type, "player");
       if (video.srcObject) formats.add("webrtc");
@@ -48,7 +51,7 @@
   }
   for (const name of ["play", "pause", "loadedmetadata", "timeupdate", "emptied"]) document.addEventListener(name, () => report(), true);
   document.addEventListener("DOMContentLoaded", schedule, {once: true});
-  new MutationObserver(schedule).observe(document, {childList: true, subtree: true, attributes: true, attributeFilter: ["src", "type", "data-stream-url", "data-embed"]});
+  new MutationObserver(schedule).observe(document, {childList: true, subtree: true, attributes: true, attributeFilter: ["src", "type", "kind", "label", "srclang", "data-stream-url", "data-embed"]});
   try { new PerformanceObserver(schedule).observe({type: "resource", buffered: true}); } catch (_) { }
   browser.runtime.onMessage.addListener(message => {
     if (message.type === "inspect") return report(true);

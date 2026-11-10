@@ -53,6 +53,26 @@ test('candidate list ranks playing iframe source and does not expose headers',as
   assert.equal(JSON.stringify(h.calls.find(c=>c.message.action==='play').message.source).includes('ad-secret'),false);
 });
 
+test('handoff carries only the chosen player captions and refreshes late tracks',async()=>{
+  const h=harness(); const root='https://cdn.test/main.m3u8';
+  h.media(root);
+  const english={url:'https://caption.test/text?language=en',label:'English'};
+  const hindi={url:'https://caption.test/text?language=hi',label:'Hindi'};
+  const playFrame=async (frameId, players)=>h.events.message({type:'players',players},{tab:{id:1},frameId});
+  const player={playing:true,width:1280,height:720,src:'blob:https://page.test/main'};
+  await playFrame(8,[{...player,subtitles:[{url:'https://ads.test/ads.vtt'}]}]);
+  await playFrame(3,[{...player,width:320,height:180,subtitles:[{url:'https://cdn.test/preview.vtt'}]},
+    {...player,subtitles:[english,{url:'http://caption.test/no.vtt'},english]}]);
+  await h.play(root);
+  const tracks=call=>JSON.parse(JSON.stringify(call.message.source.subtitles));
+  assert.deepEqual(tracks(h.calls[0]),[english]);
+  h.advance(11000);
+  await playFrame(3,[{...player,subtitles:[english,hindi]}]);
+  await h.flush();
+  assert.equal(h.calls[1].message.action,'refresh');
+  assert.deepEqual(tracks(h.calls[1]),[english,hindi]);
+});
+
 test('M4S and MP4 HLS fragments cannot evict or outrank the main playlist',async()=>{
   const h=harness(); h.media('https://cdn.test/main.m3u8');
   await h.events.message({type:'players',players:[{playing:true,width:1280,height:720,src:'blob:https://page.test/main'}]},{tab:{id:1},frameId:3});
