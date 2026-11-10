@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import ctypes
+import ipaddress
 import logging
 import os
 import sys
@@ -13,10 +14,11 @@ from pathlib import Path
 
 from PySide6.QtCore import QItemSelectionModel, QObject, QPoint, QPointF, QRect, QRectF, QSignalBlocker, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QFontDatabase, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtNetwork import QAbstractSocket, QNetworkInterface
 from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSlider, QSpinBox, QStyle, QStyledItemDelegate, QSystemTrayIcon, QVBoxLayout, QWidget
 
 from .controller import Controller, Device, Discovery, validate_host
-from .library import Library, Subtitle, scan_files
+from .library import VIDEO_EXTENSIONS, Library, Subtitle, scan_files
 from .subtitle_dialog import SubtitleDialog
 from .subtitle_jobs import SubtitleJobs, inspect_media
 from .credentials import CredentialStore
@@ -24,6 +26,7 @@ from .desktop_ui import FileDetailsDialog, PopupPanel, control_icon, draw_lines
 from .instance import SingleInstance
 from .presentation import describe_media
 from .theme import COLORS, apply_theme
+from .watch import lan_ipv4
 
 
 def app_directory() -> Path:
@@ -362,6 +365,7 @@ class Window(QMainWindow):
         self._shutdown_complete = False
         self.subtitle_dialog = None
         self.subtitle_busy = False
+        self.watch_pending_id = None
         self.worker = Worker(data / "cache")
         self.worker.event.connect(self.on_event)
         self.devices: dict[str, dict] = {}
@@ -473,12 +477,19 @@ class Window(QMainWindow):
         self.count = label("0", "section")
         heading.addWidget(self.count)
         heading.addStretch()
+        self.copy_watch_button = QPushButton("Copy watch link")
+        self.copy_watch_button.setToolTip("Copy a browser link for the selected movie")
+        self.copy_watch_button.clicked.connect(self.copy_watch_link)
+        heading.addWidget(self.copy_watch_button)
         self.playlist_options = self.icon_button("more", "Playlist options")
         self.playlist_menu = QMenu(self.playlist_options)
         self.details_action = self.playlist_menu.addAction("File details…")
         self.details_action.setShortcut("Ctrl+I")
         self.details_action.triggered.connect(lambda: self.show_file_details())
         self.addAction(self.details_action)
+        self.copy_watch_action = self.playlist_menu.addAction("Copy watch link", self.copy_watch_link)
+        self.revoke_watch_action = self.playlist_menu.addAction("Revoke watch link", self.revoke_watch_link)
+        self.playlist_menu.addSeparator()
         self.original_names = self.playlist_menu.addAction("Show original filenames")
         self.original_names.setCheckable(True)
         self.original_names.toggled.connect(self.refresh_library)
@@ -719,8 +730,11 @@ class Window(QMainWindow):
 
     def show_playlist_menu(self, position):
         item = self.queue.itemAt(position)
-        if item and not item.isSelected():
-            self.queue.setCurrentItem(item)
+        if item:
+            if item.isSelected():
+                self.queue.setCurrentItem(item, QItemSelectionModel.SelectionFlag.NoUpdate)
+            else:
+                self.queue.setCurrentItem(item)
         self.playlist_menu.popup(self.queue.viewport().mapToGlobal(position))
 
     def show_file_details(self, media_id=None):
@@ -736,7 +750,47 @@ class Window(QMainWindow):
         count = len(self.queue.selectedItems())
         self.selection_status.setText(f"{count} selected" if count else "")
         self.remove_action.setEnabled(count > 0)
-        self.details_action.setEnabled(bool(self.selected_id()))
+        media_id = self.selected_id()
+        self.details_action.setEnabled(bool(media_id))
+        is_video = bool(media_id and Path(self.library.get(media_id).path).suffix.lower() in VIDEO_EXTENSIONS)
+        can_copy_link = is_video and self.watch_pending_id is None and self._availability.get(media_id) is not False
+        self.copy_watch_button.setEnabled(can_copy_link)
+        self.copy_watch_action.setEnabled(can_copy_link)
+        self.revoke_watch_action.setEnabled(is_video)
+
+    def copy_watch_link(self):
+        media_id = self.selected_id()
+        if media_id is None or self.watch_pending_id is not None:
+            return
+        adapters = {}
+        flags = QNetworkInterface.InterfaceFlag
+        for adapter in QNetworkInterface.allInterfaces():
+            if not adapter.flags() & flags.IsUp or adapter.flags() & (flags.IsLoopBack | flags.IsPointToPoint):
+                continue
+            for entry in adapter.addressEntries():
+                if entry.ip().protocol() != QAbstractSocket.NetworkLayerProtocol.IPv4Protocol:
+                    continue
+                address = ipaddress.IPv4Address(entry.ip().toString())
+                prefix = entry.prefixLength()
+                if lan_ipv4(address) and 0 < prefix < 32:
+                    adapters[f"{adapter.humanReadableName()} ({address})"] = f"{address}/{prefix}"
+        if not adapters:
+            self.show_error("Connect this laptop to your home network to create a watch link.")
+            return
+        choice = next(iter(adapters))
+        if len(adapters) > 1:
+            choice, accepted = QInputDialog.getItem(self, "Watch link network", "Choose the adapter on your home network.", list(adapters), 0, False)
+            if not accepted:
+                return
+        self.watch_pending_id = media_id
+        self.update_selection_summary()
+        self.sleep_hold()
+        self.status.setText("Preparing watch link…")
+        self.worker.submit("copy_watch_link", media_id, adapters[choice])
+
+    def revoke_watch_link(self):
+        if media_id := self.selected_id():
+            self.worker.submit("revoke_watch_link", media_id)
 
     def update_player(self):
         selected = self.selected_id()
@@ -1014,6 +1068,23 @@ class Window(QMainWindow):
             return
         if self.quitting:
             return
+        if event.startswith("watch."):
+            if event == "watch.progress":
+                preparation = "Converting HDR to SDR" if data["hdr"] else "Preparing browser playback"
+                self.status.setText(f"{preparation} · {data['percent']:.0f}%")
+            elif event == "watch.ready":
+                QApplication.clipboard().setText(data["url"])
+                quality = " · Browser-compatible video copy" if data["mode"] == "video" else ""
+                self.status.setText(f"Watch link copied · Open on the same Wi-Fi{quality}")
+            elif event == "watch.error":
+                self.show_error(data["message"])
+            elif event == "watch.finished":
+                self.watch_pending_id = None
+                self.update_selection_summary()
+                self.sleep_hold()
+            elif event == "watch.revoked":
+                self.status.setText("Watch link revoked" if data["revoked"] else "This movie has no active watch link")
+            return
         if event.startswith("subtitles."):
             if event in {"subtitles.inspected", "subtitles.inspection_failed"}:
                 dialog = self.subtitle_dialog
@@ -1136,7 +1207,8 @@ class Window(QMainWindow):
 
     def sleep_hold(self):
         if os.name == "nt":
-            ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | (0x00000001 if self.playing or self.busy or self.subtitle_busy else 0))
+            keep_awake = self.playing or self.busy or self.subtitle_busy or self.watch_pending_id is not None
+            ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | (0x00000001 if keep_awake else 0))
 
     def show_error(self, message):
         self.status.setText(message)

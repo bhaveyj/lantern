@@ -6,7 +6,7 @@ import asyncio
 # Deliberately exclude playlists, device inputs, scripts, and network protocols.
 # These are input options and must appear before each input filename.
 LOCAL_INPUT = ("-protocol_whitelist", "file,pipe", "-format_whitelist", "mov,matroska,webm,avi,mpeg,mpegvideo,mpegts,mp3,aac,flac,wav,ogg", "-max_alloc", "268435456")
-PROBE_FIELDS = "stream=index,codec_name,codec_type,channels:stream_disposition=attached_pic:stream_tags=language,title:format=duration,format_name"
+PROBE_FIELDS = "stream=index,codec_name,codec_type,channels,pix_fmt,color_transfer:stream_disposition=attached_pic:stream_tags=language,title:format=duration,format_name"
 
 
 async def read_bounded(stream, limit: int) -> bytes:
