@@ -70,7 +70,7 @@ dependencies {
     // The WebSocket layer is vendored with allocation/fragment limits.
     implementation("org.nanohttpd:nanohttpd:2.3.1")
     testImplementation("junit:junit:4.13.2")
-    testImplementation("org.json:json:20240303")
+    testImplementation("org.json:json:20260719")
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("junit:junit:4.13.2")
 }
