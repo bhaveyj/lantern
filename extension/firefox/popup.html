@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Lantern TV</title><link rel="stylesheet" href="popup.css"></head>
+<body>
+  <header><span class="mark">L</span><div><h1>Lantern TV</h1><p>Firefox to your big screen</p></div></header>
+  <p id="connection" role="status">Checking Lantern…</p>
+  <label for="videos">Video in this tab</label>
+  <select id="videos" disabled><option>Start the video, then refresh</option></select>
+  <p id="hint">Choose the main video if more than one stream is found.</p>
+  <label class="check"><input type="checkbox" id="mute" checked> Mute this Firefox tab while watching on TV</label>
+  <label class="check"><input type="checkbox" id="pause"> Pause video on the laptop after handoff</label>
+  <p id="sessionHint">Keeping the page playing allows session updates. Pausing saves bandwidth but may interrupt renewal.</p>
+  <div class="actions"><button id="play" class="primary" disabled>Play on TV</button><button id="refresh">Refresh</button><button id="stop">Stop TV</button></div>
+  <p id="message" role="status" aria-live="polite"></p>
+  <p id="diagnostics"></p>
+  <details><summary>Setup and compatibility</summary><p>Open Lantern and connect your TV first. Install the Firefox bridge using the setup script included with Lantern. After loading this extension, reload the video page once.</p><p>This build supports HTTPS HLS and MP4 streams. Keep Lantern running and the laptop awake. Keep this tab open for session updates; paused players may need restarting if access expires. Ads inserted into the video can remain.</p><p>The extension needs access to HTTPS requests to find video inside embedded players and CDN hosts. Detected URLs and required request headers stay in memory on this computer; the extension does not save browsing history or send data to a cloud service.</p></details>
+  <script src="popup.js"></script>
+</body></html>

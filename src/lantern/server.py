@@ -9,6 +9,7 @@ from pathlib import Path
 from aiohttp import web
 
 from .media import subtitle_vtt
+from .web_stream import WebRelay
 
 
 class MediaFileResponse(web.FileResponse):
@@ -36,7 +37,9 @@ class MediaServer:
         self._subtitle_cache = OrderedDict()
         self._subtitle_cache_bytes = 0
         self._subtitle_lock = asyncio.Lock()
+        self.web = WebRelay()
         self.app = web.Application(middlewares=[self.cors])
+        self.app.on_response_prepare.append(self.response_headers)
         self.app.router.add_get("/stream/{token}/{id}", self.stream)
         self.app.router.add_get("/subtitle/{token}/{id}", self.subtitle)
         self.app.router.add_route("OPTIONS", "/{tail:.*}", self.options)
@@ -67,6 +70,13 @@ class MediaServer:
     async def options(self, request):
         return web.Response(status=204)
 
+    async def response_headers(self, request, response):
+        # Streaming relay bodies are prepared before middleware returns.
+        response.headers.update({"Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"})
+        origin = request.headers.get("Origin")
+        if origin and self.cast_compatibility and origin in {"https://www.gstatic.com", "https://cast.google.com", "null"}:
+            response.headers.update({"Access-Control-Allow-Origin": origin, "Vary": "Origin", "Access-Control-Allow-Headers": "Range, Content-Type", "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS", "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges"})
+
     async def not_found(self, request):
         raise web.HTTPNotFound()
 
@@ -76,14 +86,17 @@ class MediaServer:
 
     async def stream(self, request: web.Request):
         self.authorized(request)
-        path = self.files.get(request.match_info["id"])
-        if path is None or not path.is_file():
-            raise web.HTTPNotFound()
         if request.transport:
             for transport in list(self.transports):
                 if transport.is_closing():
                     self.transports.discard(transport)
             self.transports.add(request.transport)
+        media_id = request.match_info["id"]
+        if self.web.has(media_id):
+            return await self.web.serve(request, media_id, lambda resource_id: f"/stream/{self.token}/{resource_id}")
+        path = self.files.get(media_id)
+        if path is None or not path.is_file():
+            raise web.HTTPNotFound()
         types = {".mp4": "video/mp4", ".m4v": "video/mp4", ".mkv": "video/x-matroska", ".ts": "video/mp2t", ".m2ts": "video/mp2t", ".aac": "audio/aac", ".m4a": "audio/mp4"}
         headers = {"Cache-Control": "no-store"}
         if path.suffix.lower() in types:
@@ -92,8 +105,11 @@ class MediaServer:
 
     async def subtitle(self, request: web.Request):
         self.authorized(request)
-        path = self.subtitles.get(request.match_info["id"])
-        if path is None or not path.is_file():
+        track_id = request.match_info["id"]
+        path = self.subtitles.get(track_id)
+        if path is None:
+            return await self.web.serve_subtitle(track_id)
+        if not path.is_file():
             raise web.HTTPNotFound()
         async with self._subtitle_lock:
             converted = await self.converted_subtitle(request, path)
@@ -141,10 +157,12 @@ class MediaServer:
         self.port = self.site._server.sockets[0].getsockname()[1]
 
     async def stop(self) -> None:
+        await self.web.close()
         if self.runner:
             await self.runner.cleanup()
 
     def reset(self) -> None:
+        self.web.reset()
         for transport in list(self.transports):
             transport.close()
         self.transports.clear()

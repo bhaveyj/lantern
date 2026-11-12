@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import ctypes
+import ipaddress
 import logging
 import os
 import sys
@@ -13,10 +14,11 @@ from pathlib import Path
 
 from PySide6.QtCore import QItemSelectionModel, QObject, QPoint, QPointF, QRect, QRectF, QSignalBlocker, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QFontDatabase, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtNetwork import QAbstractSocket, QNetworkInterface
 from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSizePolicy, QSlider, QSpinBox, QStyle, QStyledItemDelegate, QSystemTrayIcon, QVBoxLayout, QWidget
 
 from .controller import Controller, Device, Discovery, validate_host
-from .library import Library, Subtitle, scan_files
+from .library import VIDEO_EXTENSIONS, Library, Subtitle, scan_files
 from .subtitle_dialog import SubtitleDialog
 from .subtitle_jobs import SubtitleJobs, inspect_media
 from .credentials import CredentialStore
@@ -24,6 +26,7 @@ from .desktop_ui import FileDetailsDialog, PopupPanel, control_icon, draw_lines
 from .instance import SingleInstance
 from .presentation import describe_media
 from .theme import COLORS, apply_theme
+from .watch import lan_ipv4
 
 
 def app_directory() -> Path:
@@ -352,7 +355,7 @@ def clock_text(value):
 class Window(QMainWindow):
     def __init__(self, data: Path, discover=True):
         super().__init__()
-        self.setWindowTitle("Lantern · Local files, big screen")
+        self.setWindowTitle("Lantern · Video on your TV")
         self.setWindowIcon(icon())
         self.resize(1120, 730)
         self.setMinimumSize(900, 600)
@@ -362,6 +365,7 @@ class Window(QMainWindow):
         self._shutdown_complete = False
         self.subtitle_dialog = None
         self.subtitle_busy = False
+        self.watch_pending_id = None
         self.worker = Worker(data / "cache")
         self.worker.event.connect(self.on_event)
         self.devices: dict[str, dict] = {}
@@ -373,6 +377,9 @@ class Window(QMainWindow):
         self.position = 0.0
         self.duration = 0.0
         self.current_id = None
+        self.web_source = {}
+        self.live = False
+        self.seekable = True
         self.quitting = False
         self.rendering = False
         self.build_ui()
@@ -424,6 +431,10 @@ class Window(QMainWindow):
         self.add_button.setObjectName("headerAction")
         self.add_button.setIcon(control_icon("plus"))
         self.add_button.clicked.connect(self.choose_files)
+        self.link_button = QPushButton("Paste video link")
+        self.link_button.setObjectName("headerAction")
+        self.link_button.clicked.connect(self.paste_video_link)
+        top.addWidget(self.link_button)
         top.addWidget(self.add_button)
         layout.addLayout(top)
         layout.addSpacing(35)
@@ -473,12 +484,19 @@ class Window(QMainWindow):
         self.count = label("0", "section")
         heading.addWidget(self.count)
         heading.addStretch()
+        self.copy_watch_button = QPushButton("Copy watch link")
+        self.copy_watch_button.setToolTip("Copy a browser link for the selected movie")
+        self.copy_watch_button.clicked.connect(self.copy_watch_link)
+        heading.addWidget(self.copy_watch_button)
         self.playlist_options = self.icon_button("more", "Playlist options")
         self.playlist_menu = QMenu(self.playlist_options)
         self.details_action = self.playlist_menu.addAction("File details…")
         self.details_action.setShortcut("Ctrl+I")
         self.details_action.triggered.connect(lambda: self.show_file_details())
         self.addAction(self.details_action)
+        self.copy_watch_action = self.playlist_menu.addAction("Copy watch link", self.copy_watch_link)
+        self.revoke_watch_action = self.playlist_menu.addAction("Revoke watch link", self.revoke_watch_link)
+        self.playlist_menu.addSeparator()
         self.original_names = self.playlist_menu.addAction("Show original filenames")
         self.original_names.setCheckable(True)
         self.original_names.toggled.connect(self.refresh_library)
@@ -594,12 +612,17 @@ class Window(QMainWindow):
         timeline.addWidget(self.seek, 1)
         self.total = label("0:00", "time")
         timeline.addWidget(self.total)
+        self.go_live = QPushButton("Go live")
+        self.go_live.setObjectName("smallQuiet")
+        self.go_live.clicked.connect(lambda: self.worker.submit("command", "live"))
+        self.go_live.hide()
+        timeline.addWidget(self.go_live)
         center.addLayout(timeline)
         dock.addLayout(center, 2)
 
         tools = QHBoxLayout()
         tools.setSpacing(2)
-        self.captions_button = self.icon_button("captions", "Subtitles for selected file")
+        self.captions_button = self.icon_button("captions", "Subtitles")
         self.captions_button.setCheckable(True)
         tools.addWidget(self.captions_button)
         self.volume_button = self.icon_button("volume", "Volume")
@@ -633,7 +656,7 @@ class Window(QMainWindow):
         self.subtitle_scope.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         subs.addWidget(self.subtitle_scope)
         self.subtitles = QComboBox()
-        self.subtitles.setAccessibleName("Subtitle track for selected file")
+        self.subtitles.setAccessibleName("Subtitle track")
         self.subtitles.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.subtitles.setMinimumContentsLength(12)
         self.subtitles.currentIndexChanged.connect(self.subtitle_changed)
@@ -719,8 +742,11 @@ class Window(QMainWindow):
 
     def show_playlist_menu(self, position):
         item = self.queue.itemAt(position)
-        if item and not item.isSelected():
-            self.queue.setCurrentItem(item)
+        if item:
+            if item.isSelected():
+                self.queue.setCurrentItem(item, QItemSelectionModel.SelectionFlag.NoUpdate)
+            else:
+                self.queue.setCurrentItem(item)
         self.playlist_menu.popup(self.queue.viewport().mapToGlobal(position))
 
     def show_file_details(self, media_id=None):
@@ -736,15 +762,56 @@ class Window(QMainWindow):
         count = len(self.queue.selectedItems())
         self.selection_status.setText(f"{count} selected" if count else "")
         self.remove_action.setEnabled(count > 0)
-        self.details_action.setEnabled(bool(self.selected_id()))
+        media_id = self.selected_id()
+        self.details_action.setEnabled(bool(media_id))
+        is_video = bool(media_id and Path(self.library.get(media_id).path).suffix.lower() in VIDEO_EXTENSIONS)
+        can_copy_link = is_video and self.watch_pending_id is None and self._availability.get(media_id) is not False
+        self.copy_watch_button.setEnabled(can_copy_link)
+        self.copy_watch_action.setEnabled(can_copy_link)
+        self.revoke_watch_action.setEnabled(is_video)
+
+    def copy_watch_link(self):
+        media_id = self.selected_id()
+        if media_id is None or self.watch_pending_id is not None:
+            return
+        adapters = {}
+        flags = QNetworkInterface.InterfaceFlag
+        for adapter in QNetworkInterface.allInterfaces():
+            if not adapter.flags() & flags.IsUp or adapter.flags() & (flags.IsLoopBack | flags.IsPointToPoint):
+                continue
+            for entry in adapter.addressEntries():
+                if entry.ip().protocol() != QAbstractSocket.NetworkLayerProtocol.IPv4Protocol:
+                    continue
+                address = ipaddress.IPv4Address(entry.ip().toString())
+                prefix = entry.prefixLength()
+                if lan_ipv4(address) and 0 < prefix < 32:
+                    adapters[f"{adapter.humanReadableName()} ({address})"] = f"{address}/{prefix}"
+        if not adapters:
+            self.show_error("Connect this laptop to your home network to create a watch link.")
+            return
+        choice = next(iter(adapters))
+        if len(adapters) > 1:
+            choice, accepted = QInputDialog.getItem(self, "Watch link network", "Choose the adapter on your home network.", list(adapters), 0, False)
+            if not accepted:
+                return
+        self.watch_pending_id = media_id
+        self.update_selection_summary()
+        self.sleep_hold()
+        self.status.setText("Preparing watch link…")
+        self.worker.submit("copy_watch_link", media_id, adapters[choice])
+
+    def revoke_watch_link(self):
+        if media_id := self.selected_id():
+            self.worker.submit("revoke_watch_link", media_id)
 
     def update_player(self):
         selected = self.selected_id()
         media_id = self.current_id or selected
         media = next((item for item in self.library.items if item.id == media_id), None)
-        title = describe_media(media.path, media.title).title if media else "Nothing selected"
+        web_playing = bool(self.current_id and self.current_id == self.web_source.get("id"))
+        title = describe_media(media.path, media.title).title if media else self.web_source.get("title", "Video link") if web_playing else "Nothing selected"
         self.now.setText(title)
-        self.now.setToolTip(title if media else "")
+        self.now.setToolTip(title if media or web_playing else "")
         if self.current_id:
             state = "Finished" if self.finished else "Playing" if self.playing else "Paused"
             destination = state + (f" on {self.connected_name}" if self.connected_name else " on your TV")
@@ -756,14 +823,14 @@ class Window(QMainWindow):
         self.playback_destination.setToolTip(destination)
         if not self.current_id:
             text, playing = "Play on TV", False
-        elif self.current_id == selected:
+        elif self.current_id == selected or web_playing:
             text, playing = "Pause" if self.playing else "Play again" if self.finished else "Resume", self.playing
         else:
             text, playing = "Play selected file on TV", False
         self.set_play_button(text, playing)
-        self.play_button.setEnabled(bool(selected))
-        self.stop_action.setEnabled(bool(self.current_id))
-        self.seek.setEnabled(bool(self.current_id) and self.duration > 0)
+        self.play_button.setEnabled(bool(selected) or web_playing)
+        self.stop_action.setEnabled(bool(self.current_id) or self.busy)
+        self.seek.setEnabled(bool(self.current_id) and self.seekable and self.duration > 0)
 
 
     def sync_library(self):
@@ -806,6 +873,9 @@ class Window(QMainWindow):
         files, _ = QFileDialog.getOpenFileNames(self, "Add video or audio", "", "Media (*.mp4 *.m4v *.mov *.mkv *.webm *.avi *.mpeg *.mpg *.ts *.m2ts *.mp3 *.m4a *.aac *.flac *.wav *.ogg)")
         self.add_files(files)
 
+    def firefox_help(self):
+        QMessageBox.information(self, "Watch from Firefox", "Connect to your TV here, then open the Lantern TV extension in Firefox while a video is playing. Choose the main video and click Play on TV.\n\nKeep Lantern running and the Firefox tab open. Stop playback here or in the extension to end the session.\n\nFor this development build, extension setup is described in docs/web-streaming.md in the project folder.")
+
     def add_files(self, files):
         if files:
             self.status.setText("Adding files…")
@@ -825,30 +895,48 @@ class Window(QMainWindow):
         self.sync_library()
 
     def selection_changed(self, *args):
-        self.rendering = True
-        self.subtitles.clear()
-        self.subtitles.addItem("Off", None)
-        media_id = self.selected_id()
-        if media_id:
-            media = self.library.get(media_id)
-            for subtitle in media.subtitles:
-                self.subtitles.addItem(subtitle.label, subtitle.id)
-            index = self.subtitles.findData(media.selected_subtitle)
-            self.subtitles.setCurrentIndex(max(0, index))
-        self.rendering = False
-        title = describe_media(media.path, media.title).title if media_id else "No file selected"
-        self.subtitle_scope.setText("For: " + title)
-        self.subtitle_scope.setToolTip(title)
-        self.captions_button.setEnabled(bool(media_id))
-        self.choose_subtitles.setEnabled(bool(media_id))
-        self.create_subtitles.setEnabled(bool(media_id) and not self.subtitle_busy)
-        if not media_id:
-            self.subtitle_panel.hide()
+        self.refresh_subtitle_menu()
         self.update_selection_summary()
         self.update_player()
 
+    def refresh_subtitle_menu(self):
+        media_id = self.selected_id()
+        if self.web_source:
+            title = self.web_source["title"]
+            tracks = [(sub["label"], sub["id"]) for sub in self.web_source.get("subtitles", [])]
+            selected = self.web_source.get("selected_subtitle")
+        elif media_id:
+            media = self.library.get(media_id)
+            title = describe_media(media.path, media.title).title
+            tracks = [(sub.label, sub.id) for sub in media.subtitles]
+            selected = media.selected_subtitle
+        else:
+            title, tracks, selected = "No file selected", [], None
+        with QSignalBlocker(self.subtitles):
+            self.subtitles.clear()
+            self.subtitles.addItem("Off", None)
+            for label, track_id in tracks:
+                self.subtitles.addItem(label, track_id)
+            self.subtitles.setCurrentIndex(max(0, self.subtitles.findData(selected)))
+        self.subtitle_scope.setText("For: " + title)
+        self.subtitle_scope.setToolTip(title)
+        available = bool(tracks) if self.web_source else bool(media_id)
+        file_actions = bool(media_id and not self.web_source)
+        self.captions_button.setEnabled(available)
+        self.choose_subtitles.setEnabled(file_actions)
+        self.create_subtitles.setEnabled(file_actions and not self.subtitle_busy)
+        if not available:
+            self.subtitle_panel.hide()
+
     def subtitle_changed(self, *args):
-        if self.rendering or not self.selected_id():
+        if self.rendering:
+            return
+        if self.web_source:
+            selected = self.subtitles.currentData()
+            self.web_source["selected_subtitle"] = selected
+            self.worker.submit("subtitle", self.web_source["id"], selected)
+            return
+        if not self.selected_id():
             return
         media = self.library.get(self.selected_id())
         media.selected_subtitle = self.subtitles.currentData()
@@ -951,8 +1039,16 @@ class Window(QMainWindow):
         if self.selected_id():
             self.worker.submit("play", self.selected_id())
 
+    def paste_video_link(self):
+        if not self.connected_kind:
+            self.show_error("Connect to your TV, then paste a video link.")
+            return
+        url, accepted = QInputDialog.getText(self, "Play a video link", "Paste an HTTPS video or watch-page link")
+        if accepted and url.strip():
+            self.worker.submit("play_link", url.strip())
+
     def play_pause(self):
-        if self.current_id and self.current_id == self.selected_id() and not self.finished:
+        if self.current_id and (self.current_id == self.selected_id() or self.current_id == self.web_source.get("id")) and not self.finished:
             self.worker.submit("command", "pause" if self.playing else "play")
         else:
             self.play_selected()
@@ -961,7 +1057,8 @@ class Window(QMainWindow):
         if action == "stop":
             self.worker.submit("stop")
         elif action == "relative":
-            self.worker.submit("command", "seek", max(0, self.position + value))
+            if self.seekable:
+                self.worker.submit("command", "seek", max(0, self.position + value))
         else:
             self.worker.submit("command", action, value)
 
@@ -1014,6 +1111,23 @@ class Window(QMainWindow):
             return
         if self.quitting:
             return
+        if event.startswith("watch."):
+            if event == "watch.progress":
+                preparation = "Converting HDR to SDR" if data["hdr"] else "Preparing browser playback"
+                self.status.setText(f"{preparation} · {data['percent']:.0f}%")
+            elif event == "watch.ready":
+                QApplication.clipboard().setText(data["url"])
+                quality = " · Browser-compatible video copy" if data["mode"] == "video" else ""
+                self.status.setText(f"Watch link copied · Open on the same Wi-Fi{quality}")
+            elif event == "watch.error":
+                self.show_error(data["message"])
+            elif event == "watch.finished":
+                self.watch_pending_id = None
+                self.update_selection_summary()
+                self.sleep_hold()
+            elif event == "watch.revoked":
+                self.status.setText("Watch link revoked" if data["revoked"] else "This movie has no active watch link")
+            return
         if event.startswith("subtitles."):
             if event in {"subtitles.inspected", "subtitles.inspection_failed"}:
                 dialog = self.subtitle_dialog
@@ -1042,11 +1156,17 @@ class Window(QMainWindow):
                 self.show_error(data["message"])
             elif event == "subtitles.finished":
                 self.subtitle_busy = False
-                self.create_subtitles.setEnabled(bool(self.selected_id()))
+                self.create_subtitles.setEnabled(bool(self.selected_id()) and not self.web_source)
                 self.subtitle_activity.hide()
             self.sleep_hold()
             return
-        if event == "library.imported":
+        if event == "web.source":
+            self.web_source = data
+            self.refresh_subtitle_menu()
+            if data:
+                self.now.setText(data["title"])
+                self.status.setText("Video link playing")
+        elif event == "library.imported":
             try:
                 added = self.library.add_scanned(data["items"])
                 self.status.setText(f"Added {len(added)} file{'s' if len(added) != 1 else ''}")
@@ -1106,7 +1226,14 @@ class Window(QMainWindow):
             self.finished = data.get("playerState") == "IDLE" and data.get("idleReason") == "FINISHED"
             self.position = data.get("position", 0)
             self.duration = data.get("duration", 0)
-            self.seek.setEnabled(self.duration > 0)
+            self.live = data.get("live", False)
+            self.seekable = data.get("seekable", not self.live)
+            self.go_live.setVisible(self.live)
+            self.seek.setEnabled(self.seekable and self.duration > 0)
+            if self.web_source and self.current_id == self.web_source["id"] and "subtitleId" in data:
+                if self.web_source.get("selected_subtitle") != data["subtitleId"]:
+                    self.web_source["selected_subtitle"] = data["subtitleId"]
+                    self.refresh_subtitle_menu()
             media = next((m for m in self.library.items if m.id == self.current_id), None)
             if media and "subtitleId" in data and media.selected_subtitle != data["subtitleId"]:
                 media.selected_subtitle = data["subtitleId"]
@@ -1125,18 +1252,19 @@ class Window(QMainWindow):
 
     def tick(self):
         if self.playing and not self.seek.isSliderDown():
-            self.position = min(self.duration, self.position + 1)
+            self.position = min(self.duration, self.position + 1) if self.duration > 0 else self.position + 1
             self.update_time()
 
     def update_time(self):
         self.elapsed.setText(clock_text(self.position))
-        self.total.setText(clock_text(self.duration))
+        self.total.setText("LIVE" if self.live else clock_text(self.duration))
         if not self.seek.isSliderDown():
             self.seek.setValue(int(self.position * 1000 / self.duration) if self.duration else 0)
 
     def sleep_hold(self):
         if os.name == "nt":
-            ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | (0x00000001 if self.playing or self.busy or self.subtitle_busy else 0))
+            keep_awake = self.playing or self.busy or self.subtitle_busy or self.watch_pending_id is not None
+            ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | (0x00000001 if keep_awake else 0))
 
     def show_error(self, message):
         self.status.setText(message)

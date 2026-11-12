@@ -1,9 +1,16 @@
 # Watch a Firefox video on Lantern TV
 
-> **Preview documentation:** The Firefox companion and relay implementation are
-> still in development and are not yet included in the published source. The
-> commands below describe the development preview and require that implementation;
-> they do not work with a documentation-only checkout.
+Connect to your TV and choose **Paste video link** in the Windows app. Direct
+HTTPS HLS and MP4 links play immediately. For a watch page, install Firefox
+normally and Lantern will open and close a private browser session for you.
+Some pages need playback interaction or use a format the receiver cannot play.
+
+The following steps are for sending video from your own Firefox tab using the
+optional manual companion.
+
+> **Development preview:** The companion is unsigned and loaded as a temporary
+> Firefox add-on. Build the Windows sender and Android receiver from the same
+> checkout before testing.
 
 This development feature sends an ordinary HLS live/on-demand stream or an MP4
 video from a Firefox tab to Lantern. The Windows app relays media over the home
@@ -101,7 +108,10 @@ automatically applied to the relay's media requests.
 ## How the connection works
 
 The Firefox extension observes HTTPS media requests and player metadata,
-including embedded frames, to offer candidates. Host permissions are required
+including explicit HLS alternatives in embedded-player URL parameters, stream
+buttons, video elements and recent resource timings. It can discover an already
+playing source without its initial request and retains discovery across hash
+and History API changes. Host permissions are required
 for both the page and its media servers. Media request URLs and a small allowlist
 of request headers are bounded and kept temporarily in the extension's memory;
 they are cleared on navigation, tab close, extension shutdown, or expiry. The

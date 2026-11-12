@@ -4,7 +4,12 @@ import java.security.SecureRandom
 
 /** Short-lived PIN with per-peer and receiver-wide failed-attempt limits. */
 class PairingGate(private val now: () -> Long = { System.nanoTime() / 1000000 }) {
+    companion object {
+        const val PIN_LIFETIME_MS = 300000L
+    }
+
     data class Attempt(val pin: String, val created: Long)
+    data class DisplayState(val pin: String, val remainingSeconds: Long)
     private val random = SecureRandom()
     var pin: String = newPin()
         private set
@@ -31,10 +36,19 @@ class PairingGate(private val now: () -> Long = { System.nanoTime() / 1000000 })
     }
     @Synchronized fun succeeded(peer: String) { failures.remove(peer) }
 
-    @Synchronized fun refresh(): Boolean {
-        if (now() - created < 300000) return false
+    @Synchronized fun refresh(): Boolean = refreshAt(now())
+
+    @Synchronized fun displayState(): DisplayState {
+        val current = now()
+        refreshAt(current)
+        val remainingMs = (PIN_LIFETIME_MS - (current - created)).coerceIn(0L, PIN_LIFETIME_MS)
+        return DisplayState(pin, (remainingMs + 999) / 1000)
+    }
+
+    private fun refreshAt(current: Long): Boolean {
+        if (current - created < PIN_LIFETIME_MS) return false
         pin = newPin()
-        created = now()
+        created = current
         return true
     }
 

@@ -84,6 +84,7 @@ This creates:
 - `dist/Lantern/Lantern.exe` — portable application.
 - `dist/Lantern-Windows-0.1.0.zip` — portable archive.
 - `dist/Lantern-Setup-0.1.0.exe` — installer, only when `.tools/inno/ISCC.exe` is available.
+- `dist/LanternFirefoxBridge.exe` and `dist/Lantern-Firefox-0.1.1.xpi` — native helper and unsigned Firefox companion. The portable app also includes the unpacked extension, its setup script, and documentation.
 
 To produce the installer, install Inno Setup 6 and make its compiler available at `.tools/inno/ISCC.exe`, or adapt `scripts/build-windows.ps1` to your local installation. The script copies the README, license, and third-party notices into the portable distribution.
 
@@ -105,7 +106,15 @@ Run the automated Python suite from the repository root:
 ./.venv/Scripts/python.exe -m pytest -q
 ```
 
-The suite covers library persistence, pairing/control integration, receiver keepalives, Cast startup and polling, media codec decisions, FFmpeg preparation, subtitles, authorized/ranged streaming, and large-file seeking. Android unit tests run as part of `scripts/build-android.ps1`.
+The suite covers library persistence, pairing/control integration, receiver keepalives, Cast startup and polling, media codec decisions, FFmpeg preparation, subtitles, authorized/ranged streaming, large-file seeking, the native browser bridge, and the bounded web-media relay. Android unit tests run as part of `scripts/build-android.ps1`.
+
+With Node.js 22 or newer, run the Firefox companion tests:
+
+```powershell
+node --test extension/firefox/tests/core.test.cjs extension/firefox/tests/background.test.cjs
+```
+
+These cover source discovery, embedded-player alternatives, session refresh, credential scoping, and popup-only playback commands. CI runs them alongside the Python and Android checks. Two optional Python checks use a locally captured diagnostic segment when present; the fixture is intentionally excluded from Git and those checks skip in a clean checkout.
 
 GitHub CI runs the regression suites, verifies media tools, scans Git history with pinned Gitleaks, and audits exact Python plus resolved Android Maven dependencies against OSV on pushes and pull requests. An unavailable or incomplete dependency scan fails the check. Native FFmpeg/Qt/ML library advisories still require upstream review; a clean package scan is not a guarantee of safety. CI does not publish or deploy artifacts.
 
@@ -130,6 +139,7 @@ The device smoke test defaults to a 90-second playback hold and writes its local
 src/lantern/              Windows sender, controller, media server, library
 android/app/src/          Android TV receiver and pairing/control server
 tests/                    Python unit and integration tests
+extension/firefox/       Firefox companion, native entry point and JavaScript tests
 scripts/                  Bootstrap, build, firewall, smoke-test, and tooling scripts
 docs/protocol.md          Receiver protocol v3
 docs/testing.md           Physical-device stability test procedure

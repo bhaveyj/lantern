@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import ipaddress
 import logging
 import socket
@@ -16,10 +17,14 @@ import aiohttp
 import pychromecast
 from zeroconf import ServiceBrowser, ServiceListener, Zeroconf
 
-from .media import Preparation, playback_plan, probe
+from .media import Preparation, browser_video_mode, can_copy_stereo_audio, file_version, playback_plan, probe
 from .server import MediaServer
-from .security import LocalIdentity, receiver_fingerprint
+from .security import LocalIdentity, ReceiverConnectionError, receiver_fingerprint
 from .pairing import PairedReceivers, PairingRequired, authenticate
+from .browser_bridge import BrowserBridge, BrowserCommandError
+from .managed_firefox import ManagedFirefox
+from .web_stream import checked_url
+from .watch import WatchServer
 
 RECEIVER_PING_INTERVAL = 10.0
 CAST_LOAD_TIMEOUT = 15.0
@@ -104,6 +109,10 @@ class Controller:
         self.emit = emit
         self.server = MediaServer()
         self.preparation = Preparation(cache)
+        self.watch = WatchServer()
+        self.watch_preparation = Preparation(cache / "watch")
+        self._watch_job: tuple[dict, asyncio.Task] | None = None
+        self._watch_closing = False
         self.session: aiohttp.ClientSession | None = None
         self.ws: aiohttp.ClientWebSocketResponse | None = None
         self.reader: asyncio.Task | None = None
@@ -133,6 +142,11 @@ class Controller:
         self.identity = None
         self.pairings = PairedReceivers(cache.parent / "security" / "paired-receivers.bin")
         self.receiver_identity = None
+        self.web_item: dict | None = None
+        self._pending_web_session: str | None = None
+        self.web_stream_version = 0
+        self.browser_bridge = BrowserBridge(cache.parent, self.browser_message)
+        self.link_browser = ManagedFirefox(cache.parent / "browser-sessions", self.browser_message, self.emit)
 
     async def cast_call(self, function, *args, **kwargs):
         task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
@@ -164,6 +178,123 @@ class Controller:
         self.loop = asyncio.get_running_loop()
         self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12))
         await self.server.start()
+        try:
+            await self.browser_bridge.start()
+        except (OSError, ValueError):
+            self.emit("notice", {"message": "Firefox connection could not start. Local files are still available; restart Lantern to retry."})
+
+    def playback_items(self) -> list[dict]:
+        return self.playlist + ([self.web_item] if self.web_item else [])
+
+    def web_state(self) -> dict:
+        return {key: self.web_item[key] for key in ("id", "title", "live", "seekable", "subtitles", "selected_subtitle")} if self.web_item else {}
+
+    def browser_connected(self) -> bool:
+        return bool(self.device and ((self.device.kind == "receiver" and self.ws is not None and not self.ws.closed) or (self.device.kind == "cast" and self.cast is not None)))
+
+    def owns_web_session(self, session_id: str) -> bool:
+        return bool(session_id and (self._pending_web_session == session_id or (self.web_item and self.web_item["session_id"] == session_id)))
+
+    async def play_link(self, value: str):
+        if not self.browser_connected():
+            raise BrowserCommandError("Connect to your TV, then paste a video link.")
+        if self.device.kind == "receiver" and self.web_stream_version < 1:
+            raise BrowserCommandError("Update the Lantern receiver on your TV to play video links.")
+        url = checked_url(value.strip())
+        path = urlparse(url).path.lower()
+        if path.endswith((".m3u8", ".mp4")):
+            self.link_browser.cancel()
+            await self.browser_message({"action": "play", "source": {
+                "url": url, "sessionId": uuid.uuid4().hex, "title": urlparse(url).hostname or "Video link",
+                "mimeType": "application/vnd.apple.mpegurl" if path.endswith(".m3u8") else "video/mp4",
+                "preferCompatible": True,
+            }})
+            return
+        self.link_browser.play(url)
+
+    async def browser_message(self, message: dict) -> dict:
+        """Commands from the allowlisted Firefox companion, never from a webpage."""
+        action = message.get("action")
+        if action == "status":
+            return {"ok": True, "connected": self.browser_connected(), "device": self.device.name if self.device else "", "source": self.web_state(), "formats": ["hls", "mp4"]}
+        if action not in {"play", "refresh", "stop"}:
+            raise BrowserCommandError("Unknown Firefox playback action.")
+        source = message.get("source")
+        if action in {"play", "refresh"} and not isinstance(source, dict):
+            raise BrowserCommandError("Choose a video in the Firefox extension.")
+        if action == "stop":
+            # A stale Firefox tab must not stop a newer session or a local file.
+            session_id = source.get("sessionId") if isinstance(source, dict) else None
+            if not self.owns_web_session(session_id):
+                return {"ok": True, "stopped": False}
+            await self.cancel_playback()
+            async with self._operation_lock:
+                if not self.owns_web_session(session_id):
+                    # Cancelling preparation already stopped this session. Do not
+                    # interrupt a local file or newer browser session meanwhile.
+                    return {"ok": True, "stopped": not self.current_id and not self._pending_web_session}
+                if self.web_item and source.get("sessionId") != self.web_item["session_id"]:
+                    return {"ok": True, "stopped": False}
+                await self._stop()
+            return {"ok": True, "stopped": True}
+        if action == "refresh":
+            task = asyncio.current_task()
+            self._playback_tasks.add(task)
+            try:
+                async with self._operation_lock:
+                    if not self.web_item or source.get("sessionId") != self.web_item["session_id"]:
+                        raise BrowserCommandError("This Firefox video is no longer playing on Lantern.")
+                    stream = await self.server.web.refresh(source)
+                    source_key = hashlib.sha256(source["url"].encode()).hexdigest()
+                    changed = source_key != self.web_item["source_key"]
+                    self.web_item["source_key"] = source_key
+                    self.web_item.update(live=stream.live)
+                    subtitles = stream.subtitle_items()
+                    tracks_changed = subtitles != self.web_item["subtitles"]
+                    if tracks_changed:
+                        self.web_item["subtitles"] = subtitles
+                        if self.web_item["selected_subtitle"] not in {sub["id"] for sub in subtitles}:
+                            self.web_item["selected_subtitle"] = None
+                            self._subtitle_revisions[stream.id] = self._subtitle_revisions.get(stream.id, 0) + 1
+                    self.emit("web.source", self.web_state())
+                    if changed:
+                        # HLS players reload child playlists, not an already-loaded
+                        # master. Reopen a renewed root so old child tokens retire.
+                        await self._play(stream.id, 0 if stream.live else self.current_position, autoplay=self.playing)
+                    elif tracks_changed and self.device.kind == "receiver":
+                        await self.send({"type": "playlist.snapshot", "items": self.wire_playlist()})
+                return {"ok": True, "source": self.web_state()}
+            finally:
+                self._playback_tasks.discard(task)
+        if not self.browser_connected():
+            raise BrowserCommandError("Open Lantern on Windows and connect to your TV first.")
+        if self.device.kind == "receiver" and self.web_stream_version < 1:
+            raise BrowserCommandError("Install the updated Lantern TV APK to play videos from Firefox.")
+        await self.cancel_playback()
+        task = asyncio.current_task()
+        self._playback_tasks.add(task)
+        try:
+            async with self._operation_lock:
+                if not self.browser_connected():
+                    raise BrowserCommandError("Connect to your TV first.")
+                await self._stop()
+                self.emit("status", {"message": "Loading video on your TV…", "busy": True})
+                self._pending_web_session = source.get("sessionId")
+                try:
+                    stream = await self.server.web.register(source)
+                    self._pending_web_session = None
+                    self.web_item = {"id": stream.id, "title": stream.title, "session_id": stream.session_id, "source_key": hashlib.sha256(source["url"].encode()).hexdigest(), "mime_type": stream.mime_type, "live": stream.live, "seekable": True, "duration": getattr(stream, "duration", 0.0), "subtitles": stream.subtitle_items(), "selected_subtitle": None}
+                    self.mime_types[stream.id] = stream.mime_type
+                    self.emit("web.source", self.web_state())
+                    await self.send({"type": "playlist.snapshot", "items": self.wire_playlist()})
+                    await self._play(stream.id)
+                    self.emit("status", {"message": "Video sent to your TV", "busy": False})
+                except BaseException:
+                    await self._stop()
+                    raise
+            return {"ok": True, "source": self.web_state()}
+        finally:
+            self._playback_tasks.discard(task)
 
     async def sync(self, items: list[dict]):
         async with self._operation_lock:
@@ -175,7 +306,14 @@ class Controller:
         previous_paths = {m["id"]: m["path"] for m in self.playlist}
         prepared_files = dict(self.server.files)
         self.playlist = copy.deepcopy(items)
-        self._subtitle_revisions = {m["id"]: self._subtitle_revisions.get(m["id"], 0) for m in self.playlist}
+        self.watch.sync(self.playlist)
+        if self._watch_job:
+            pending, task = self._watch_job
+            replacement = next((item for item in self.playlist if item["id"] == pending["id"]), None)
+            if replacement is None or replacement["path"] != pending["path"] or replacement["subtitles"] != pending["subtitles"]:
+                if not task.cancelling():
+                    task.cancel()
+        self._subtitle_revisions = {m["id"]: self._subtitle_revisions.get(m["id"], 0) for m in self.playback_items()}
         self.server.files.clear()
         self.server.subtitles.clear()
         for item in self.playlist:
@@ -206,7 +344,7 @@ class Controller:
         if not self.device:
             return []
         host = local_address(self.device.host)
-        return [{"id": m["id"], "title": m["title"], "url": self.server.url(host, m["id"]), "selectedSubtitle": m.get("selected_subtitle"), "subtitleRevision": self._subtitle_revisions.get(m["id"], 0), "subtitles": [{"id": s["id"], "label": s["label"], "url": self.server.subtitle_url(host, s["id"])} for s in m["subtitles"]]} for m in self.playlist]
+        return [{"id": m["id"], "title": m["title"], "url": self.server.url(host, m["id"]), "mimeType": self.mime_types.get(m["id"], m.get("mime_type", "")), "live": m.get("live", False), "seekable": True if m is self.web_item else m.get("seekable", True), "selectedSubtitle": m.get("selected_subtitle"), "subtitleRevision": self._subtitle_revisions.get(m["id"], 0), "subtitles": [{"id": s["id"], "label": s["label"], "url": self.server.subtitle_url(host, s["id"])} for s in m["subtitles"]]} for m in self.playback_items()]
 
     async def connect(self, device: dict, pin: str = ""):
         await self.cancel_playback()
@@ -254,8 +392,10 @@ class Controller:
                     raise ValueError("Enter the six-digit code displayed by Lantern on your TV.")
                 try:
                     observed = await receiver_fingerprint(self.device.host, self.device.port)
+                except ReceiverConnectionError as error:
+                    raise ValueError(str(error)) from None
                 except (OSError, TimeoutError):
-                    raise ValueError("A secure connection to the TV failed. Update the TV receiver; unencrypted pairing is disabled.") from None
+                    raise ValueError(f"Cannot reach the TV at {self.device.host}:{self.device.port}. Check its IP address, keep Lantern TV open, and connect both devices to the same home network.") from None
                 saved = await asyncio.to_thread(self.pairings.get, observed)
                 if saved is None and not pin:
                     records = await asyncio.to_thread(self.pairings.read)
@@ -279,6 +419,8 @@ class Controller:
                 await asyncio.to_thread(self.pairings.save, observed, client_id, key, device)
                 self.receiver_identity = observed
                 self.audio_mimes = response.get("audioMimes", [])
+                version = response.get("webStreamVersion", 0)
+                self.web_stream_version = version if type(version) is int and version >= 0 else 0
                 self.reader = asyncio.create_task(self.read_receiver(self.ws))
                 self.receiver_keepalive_task = asyncio.create_task(self.keep_receiver_alive(self.ws))
                 await self._sync(self.playlist)
@@ -344,7 +486,13 @@ class Controller:
         self.current_id = data.get("id")
         self.current_position = data.get("position", 0)
         self.playing = data.get("playing", False)
-        item = next((m for m in self.playlist if m["id"] == self.current_id), None)
+        item = next((m for m in self.playback_items() if m["id"] == self.current_id), None)
+        if item:
+            data.setdefault("title", item.get("title", "Video"))
+            data.setdefault("live", item.get("live", False))
+            data.setdefault("seekable", item.get("seekable", True))
+            if item is self.web_item:
+                item["seekable"] = bool(data["seekable"])
         if item and "subtitleId" in data:
             selected = data["subtitleId"]
             current_revision = self._subtitle_revisions.get(item["id"], 0)
@@ -377,12 +525,10 @@ class Controller:
             if asyncio.current_task() is self.play_task and generation == self._session_generation:
                 self.emit("status", {"message": "Ready", "busy": False})
 
-    async def prepared_url(self, item: dict, cast: bool) -> tuple[str, float]:
-        path = Path(item["path"])
+    async def probe_file(self, path: Path):
         if not path.is_file():
             raise ValueError(f"The original file is no longer available: {path.name}")
-        stat = path.stat()
-        key = (str(path), stat.st_size, stat.st_mtime_ns)
+        key = (path, file_version(path))
         info = self._probe_cache.get(key)
         if info is None:
             info = await probe(path)
@@ -390,6 +536,71 @@ class Controller:
             if len(self._probe_cache) > 256:
                 self._probe_cache.popitem(last=False)
         self._probe_cache.move_to_end(key)
+        return info
+
+    async def copy_watch_link(self, media_id: str, interface: str):
+        if self._watch_closing:
+            return
+        if self._watch_job:
+            self.emit("watch.error", {"message": "Lantern is already preparing a watch link."})
+            return
+        item = next((item for item in self.playlist if item["id"] == media_id), None)
+        if item is None:
+            self.emit("watch.error", {"message": "This movie is no longer in the playlist."})
+            self.emit("watch.finished", {"id": media_id})
+            return
+        self._watch_job = (item, asyncio.current_task())
+        try:
+            source = Path(item["path"])
+            if not source.is_file():
+                raise ValueError(f"The original file is no longer available: {source.name}")
+            version = file_version(source)
+            info = await self.probe_file(source)
+            if file_version(source) != version:
+                raise ValueError("The movie changed during inspection. Copy the watch link again.")
+            mode = browser_video_mode(info, source.suffix)
+            await self.watch.start(ipaddress.IPv4Interface(interface))
+            url = self.watch.existing_url(item, version)
+            if not url:
+                video = source
+                if mode != "direct":
+                    self.watch_preparation.pinned = {link.video for link in self.watch.links.values()}
+                    def report_progress(percent):
+                        self.emit("watch.progress", {"id": media_id, "percent": percent, "hdr": info.is_hdr})
+                    report_progress(0)
+                    video = await self.watch_preparation.prepare(
+                        source, info, report_progress,
+                        copy_audio=can_copy_stereo_audio(info), encode_video=mode == "video",
+                    )
+                if file_version(source) != version:
+                    raise ValueError("The movie changed during preparation. Copy the watch link again.")
+                url = self.watch.publish(copy.deepcopy(item), source, version, video)
+            self.emit("watch.ready", {"id": media_id, "url": url, "mode": mode})
+        except Exception as error:
+            logger.exception("Watch link preparation failed")
+            self.emit("watch.error", {"message": str(error)})
+        finally:
+            self._watch_job = None
+            self.emit("watch.finished", {"id": media_id})
+
+    async def revoke_watch_link(self, media_id: str):
+        revoked = self.watch.revoke(media_id)
+        if self._watch_job and self._watch_job[0]["id"] == media_id:
+            task = self._watch_job[1]
+            if not task.cancelling():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            revoked = True
+        self.emit("watch.revoked", {"revoked": revoked})
+
+    async def prepared_url(self, item: dict, cast: bool) -> tuple[str, float]:
+        if item is self.web_item:
+            if not self.server.web.has(item["id"]):
+                raise ValueError("This Firefox session has ended. Send the video again from Firefox.")
+            self.mime_types[item["id"]] = item["mime_type"]
+            return self.server.url(local_address(self.device.host), item["id"]), item.get("duration", 0.0)
+        path = Path(item["path"])
+        info = await self.probe_file(path)
         plan = playback_plan(info, cast, self.audio_mimes, path.suffix)
         self.mime_types[item["id"]] = plan.mime_type
         if plan.mode != "direct":
@@ -422,7 +633,13 @@ class Controller:
     async def _play(self, media_id: str, position: float = 0, *, autoplay: bool = True):
         if not self.device:
             raise ValueError("Connect to your TV first.")
-        item = next(m for m in self.playlist if m["id"] == media_id)
+        item = next((m for m in self.playback_items() if m["id"] == media_id), None)
+        if item is None:
+            raise ValueError("This video is no longer available. Choose it again.")
+        if item is not self.web_item:
+            self.link_browser.cancel()
+        if self.web_item and item is not self.web_item:
+            await self._stop()
         url, duration = await self.prepared_url(item, self.device.kind == "cast")
         self.current_id = media_id
         self.current_position = position
@@ -454,18 +671,20 @@ class Controller:
             self.preload_task = self.playback_task(self.preload_next(media_id))
         if self.device.kind == "receiver":
             self.playing = autoplay
-            self.emit("state", {"id": media_id, "playing": autoplay, "position": position, "duration": duration})
+            self.emit("state", {"id": media_id, "title": item["title"], "playing": autoplay, "position": position, "duration": duration, "live": item.get("live", False), "seekable": item.get("seekable", True) and not item.get("live", False)})
 
     async def cast_load(self, item: dict, url: str, enqueue: bool, position: float = 0, *, autoplay: bool = True):
         sub = next((s for s in item["subtitles"] if s["id"] == item.get("selected_subtitle")), None)
         subtitle_url = self.server.subtitle_url(local_address(self.device.host), sub["id"]) if sub else None
-        await self.cast_call(self.cast.media_controller.play_media, url, self.mime_types.get(item["id"], "video/mp4"), title=item["title"], stream_type="BUFFERED", subtitles=subtitle_url, subtitles_mime="text/vtt", enqueue=enqueue, current_time=position, autoplay=autoplay)
+        await self.cast_call(self.cast.media_controller.play_media, url, self.mime_types.get(item["id"], "video/mp4"), title=item["title"], stream_type="LIVE" if item.get("live") else "BUFFERED", subtitles=subtitle_url, subtitles_mime="text/vtt", enqueue=enqueue, current_time=position, autoplay=autoplay)
 
     async def preload_next(self, media_id: str):
         async with self._operation_lock:
             await self._preload_next(media_id)
 
     async def _preload_next(self, media_id: str):
+        if self.web_item and media_id == self.web_item["id"]:
+            return
         try:
             index = next(i for i, m in enumerate(self.playlist) if m["id"] == media_id)
             if index + 1 < len(self.playlist):
@@ -533,11 +752,13 @@ class Controller:
         if data.get("idleReason") == "ERROR":
             self.on_cast_load_failed("PLAYBACK_ERROR", generation)
             return
-        if data["id"] in {m["id"] for m in self.playlist}:
+        item = next((m for m in self.playback_items() if m["id"] == data["id"]), None)
+        if item:
             changed = self.current_id != data["id"]
             self.current_id = data["id"]
             self.current_position = data["position"]
             self.playing = data["playing"]
+            data.update(title=item["title"], live=item.get("live", False), seekable=item.get("seekable", True))
             self.emit("state", data)
             if changed:
                 self.preload_task = self.playback_task(self.preload_next(self.current_id))
@@ -547,6 +768,9 @@ class Controller:
     async def command(self, action: str, value=None):
         if not self.device:
             return
+        if self.web_item and self.current_id == self.web_item["id"]:
+            if action in {"next", "previous"} or (action == "seek" and not self.web_item.get("seekable")):
+                return
         if self.device.kind == "receiver":
             await self.send({"type": "playback.command", "action": action, "value": value})
         elif self.cast:
@@ -559,6 +783,8 @@ class Controller:
                 await self.cast_call(mc.seek, max(0, float(value)))
             elif action == "volume":
                 await self.cast_call(self.cast.set_volume, float(value))
+            elif action == "live" and self.web_item and self.web_item.get("live"):
+                self.queue_play(self.web_item["id"])
             elif action in {"next", "previous"} and self.current_id:
                 index = next((i for i, m in enumerate(self.playlist) if m["id"] == self.current_id), 0)
                 index = max(0, min(len(self.playlist) - 1, index + (1 if action == "next" else -1)))
@@ -569,19 +795,25 @@ class Controller:
             await self._subtitle(media_id, subtitle_id)
 
     async def _subtitle(self, media_id: str, subtitle_id: str | None):
-        item = next(m for m in self.playlist if m["id"] == media_id)
+        item = next((m for m in self.playback_items() if m["id"] == media_id), None)
+        if item is None:
+            raise ValueError("This video is no longer available.")
         if subtitle_id is not None and subtitle_id not in {s["id"] for s in item["subtitles"]}:
             raise ValueError("This subtitle is no longer in the playlist.")
         item["selected_subtitle"] = subtitle_id
         revision = self._subtitle_revisions[media_id] = self._subtitle_revisions.get(media_id, 0) + 1
         if self.device and self.device.kind == "receiver":
-            await self.send({"type": "playlist.snapshot", "items": self.wire_playlist()})
+            if item is not self.web_item:
+                await self.send({"type": "playlist.snapshot", "items": self.wire_playlist()})
             if self.current_id == media_id:
                 await self.send({"type": "playback.command", "action": "subtitle", "value": subtitle_id, "revision": revision})
+        elif item is self.web_item and self.current_id == media_id and self.cast:
+            await self._play(media_id, 0 if item["live"] else self.current_position, autoplay=self.playing)
         elif self.current_id == media_id:
             self.emit("notice", {"message": "The subtitle selection will apply when you play this video again in Cast mode."})
 
     async def stop(self):
+        self.link_browser.cancel()
         await self.cancel_playback()
         async with self._operation_lock:
             await self._stop()
@@ -597,6 +829,12 @@ class Controller:
             logger.warning("Remote stop failed: %s", error)
         finally:
             self.server.reset()
+            if self.web_item:
+                self.mime_types.pop(self.web_item["id"], None)
+                self._subtitle_revisions.pop(self.web_item["id"], None)
+            self.web_item = None
+            self._pending_web_session = None
+            self.emit("web.source", {})
             self.current_id = None
             self.current_position = 0
             self.playing = False
@@ -622,6 +860,7 @@ class Controller:
                 await self._disconnect()
 
     async def _disconnect(self):
+        self.link_browser.cancel()
         self._session_generation += 1
         try:
             await self._stop()
@@ -653,15 +892,28 @@ class Controller:
                 finally:
                     self.cast = None
             self.device = None
+            self.web_stream_version = 0
             self.receiver_identity = None
             if self.server.runner:
                 await self.server.configure("127.0.0.1")
             self.emit("disconnected", {})
 
     async def close(self):
+        self._watch_closing = True
+        if self._watch_job:
+            task = self._watch_job[1]
+            if not task.cancelling():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         try:
-            await self.disconnect()
+            await self.watch.close()
+            await self.watch_preparation.cleanup_async()
+            await self.link_browser.close()
+            await self.browser_bridge.close()
         finally:
-            if self.session:
-                await self.session.close()
-            await self.server.stop()
+            try:
+                await self.disconnect()
+            finally:
+                if self.session:
+                    await self.session.close()
+                await self.server.stop()

@@ -1,20 +1,67 @@
 import asyncio
 import os
 import threading
+from types import SimpleNamespace
 
 import aiohttp
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QTimer, Qt
+from PySide6.QtNetwork import QHostAddress, QNetworkAddressEntry, QNetworkInterface
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from lantern.app import PlaylistDelegate, Window, Worker
+from lantern import app, controller, watch
 from lantern.library import Library, Subtitle, scan_files
+from lantern.media import Probe
 from lantern.subtitle_dialog import SubtitleDialog
 
 LONG_NAME = "Spider-Man.Brand.New.Day.2026.IMAX.2160p.CORE.WEB-DL.DDP5.1.Atmos.HDR.H.265-NotSoNewDayForSony.mkv"
+
+
+async def test_playlist_watch_button_copies_a_working_link_without_a_tv(qt_app, monkeypatch, tmp_path):
+    source = tmp_path / "Movie.mp4"
+    source.write_bytes(b"original video bytes")
+    entry = QNetworkAddressEntry()
+    entry.setIp(QHostAddress("127.0.0.1"))
+    entry.setPrefixLength(24)
+    adapter = SimpleNamespace(
+        flags=lambda: QNetworkInterface.InterfaceFlag.IsUp,
+        addressEntries=lambda: [entry],
+        humanReadableName=lambda: "Test network",
+    )
+    monkeypatch.setattr(QNetworkInterface, "allInterfaces", lambda: [adapter])
+    monkeypatch.setattr(app, "lan_ipv4", lambda address: address.is_loopback)
+    monkeypatch.setattr(watch, "lan_ipv4", lambda address: address.is_loopback)
+
+    async def probe_movie(_):
+        return Probe("h264", None, 1, "mov,mp4", pixel_format="yuv420p")
+
+    monkeypatch.setattr(controller, "probe", probe_movie)
+    window = Window(tmp_path / "data", discover=False)
+    try:
+        assert not window.copy_watch_button.isEnabled()
+        window.library.add([str(source)])
+        window.refresh_library()
+        window.sync_library()
+        assert window.copy_watch_button.isEnabled()
+        window.copy_watch_button.click()
+        assert not window.copy_watch_button.isEnabled()
+        await qt_wait(qt_app, lambda: window.watch_pending_id is None)
+        assert window.copy_watch_button.isEnabled()
+        url = QApplication.clipboard().text()
+        assert url.startswith("http://127.0.0.1:") and "/watch/" in url
+        async with aiohttp.ClientSession() as client:
+            async with client.get(url + "/video") as response:
+                assert await response.read() == source.read_bytes()
+            window.revoke_watch_action.trigger()
+            await qt_wait(qt_app, lambda: window.status.text() == "Watch link revoked")
+            assert (await client.get(url)).status == 404
+    finally:
+        window.quit()
+        await qt_wait(qt_app, lambda: window._shutdown_complete)
 
 
 async def test_connect_asks_for_code_only_when_worker_requests_it(qt_app, monkeypatch, tmp_path):
@@ -179,6 +226,52 @@ async def test_connection_header_does_not_claim_cast_is_encrypted(qt_app, tmp_pa
         await qt_wait(qt_app, lambda: window._shutdown_complete)
 
 
+async def test_browser_video_controls_do_not_require_a_file_selection(qt_app, monkeypatch, tmp_path):
+    window = Window(tmp_path / "data", discover=False)
+    calls = []
+    submit = window.worker.submit
+    try:
+        await qt_wait(qt_app, lambda: window.worker.ready.is_set())
+        monkeypatch.setattr(window.worker, "submit", lambda *args: calls.append(args))
+        window.on_event("web.source", {"id": "web-video", "title": "Football from Firefox", "live": True, "seekable": False})
+        window.on_event("state", {"id": "web-video", "title": "Football from Firefox", "playing": True, "live": True, "seekable": False, "duration": 0})
+        assert window.now.text() == "Football from Firefox"
+        assert window.total.text() == "LIVE"
+        assert not window.seek.isEnabled()
+        assert not window.go_live.isHidden()
+        window.play_pause()
+        window.go_live.click()
+        assert calls == [("command", "pause"), ("command", "live")]
+        assert not window.library.items
+    finally:
+        monkeypatch.setattr(window.worker, "submit", submit)
+        window.quit()
+        await qt_wait(qt_app, lambda: window._shutdown_complete)
+
+
+async def test_browser_subtitles_use_web_session_instead_of_selected_file(qt_app, monkeypatch, tmp_path):
+    window = Window(tmp_path / "data", discover=False)
+    submit, calls = window.worker.submit, []
+    try:
+        await qt_wait(qt_app, lambda: window.worker.ready.is_set())
+        monkeypatch.setattr(window.worker, "submit", lambda *args: calls.append(args))
+        window.on_event("web.source", {"id": "web-video", "title": "Online movie",
+                                      "subtitles": [{"id": "english", "label": "English"}]})
+        assert window.captions_button.isEnabled()
+        assert not window.create_subtitles.isEnabled()
+        window.subtitles.setCurrentIndex(1)
+        assert calls == [("subtitle", "web-video", "english")]
+        window.on_event("state", {"id": "web-video", "subtitleId": None})
+        assert window.subtitles.currentIndex() == 0
+        assert len(calls) == 1
+        window.on_event("web.source", {})
+        assert not window.captions_button.isEnabled()
+    finally:
+        monkeypatch.setattr(window.worker, "submit", submit)
+        window.quit()
+        await qt_wait(qt_app, lambda: window._shutdown_complete)
+
+
 async def qt_wait(app, predicate):
     for _ in range(300):
         app.processEvents()
@@ -337,5 +430,22 @@ async def test_created_hindi_subtitles_are_served_as_webvtt_through_real_worker(
                 assert "नमस्ते दुनिया।" in text
         assert source.read_bytes() == b""
     finally:
+        window.quit()
+        await qt_wait(qt_app, lambda: window._shutdown_complete)
+
+
+async def test_paste_video_link_uses_the_connected_receiver(qt_app, monkeypatch, tmp_path):
+    window = Window(tmp_path / "data", discover=False)
+    calls = []
+    submit = window.worker.submit
+    try:
+        await qt_wait(qt_app, lambda: window.worker.ready.is_set())
+        window.connected_kind = "receiver"
+        monkeypatch.setattr(window.worker, "submit", lambda *args: calls.append(args))
+        monkeypatch.setattr("lantern.app.QInputDialog.getText", lambda *args: ("  https://example.com/watch/123  ", True))
+        window.link_button.click()
+        assert calls == [("play_link", "https://example.com/watch/123")]
+    finally:
+        monkeypatch.setattr(window.worker, "submit", submit)
         window.quit()
         await qt_wait(qt_app, lambda: window._shutdown_complete)

@@ -8,8 +8,28 @@ from aiohttp import web
 
 from lantern.controller import Controller, Device, validate_host
 from lantern.media import Probe
-from lantern.security import LocalIdentity
+from lantern.security import LocalIdentity, ReceiverConnectionError
 from pairing_peer import accept
+
+
+@pytest.mark.parametrize("failure, expected", [
+    (ReceiverConnectionError("127.0.0.1", 8765, "tcp", "timeout"), "did not respond"),
+    (ReceiverConnectionError("127.0.0.1", 8765, "tls", "failed"), "encrypted connection failed"),
+    (OSError("internal transport information"), "Cannot reach the TV"),
+])
+async def test_connection_diagnostic_preserves_failure_phase_and_stops_before_pairing(monkeypatch, tmp_path, failure, expected):
+    async def failed_fingerprint(host, port):
+        raise failure
+    monkeypatch.setattr("lantern.controller.receiver_fingerprint", failed_fingerprint)
+    controller = Controller(tmp_path / "cache", lambda *_: None)
+    await controller.start()
+    try:
+        with pytest.raises(ValueError, match=expected) as result:
+            await controller.connect(asdict(Device("tv", "TV", "127.0.0.1", 8765, "receiver")), "123456")
+        assert "internal transport information" not in str(result.value)
+        assert controller.ws is None and not controller.pairings.read()
+    finally:
+        await controller.close()
 
 
 def test_only_local_ip_addresses_are_accepted():
