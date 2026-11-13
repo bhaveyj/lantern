@@ -46,6 +46,7 @@ def managed_addon(path: Path, config: dict) -> None:
     manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
     manifest["permissions"].remove("nativeMessaging")
     manifest["permissions"].append("http://127.0.0.1/*")
+    del manifest["browser_action"]
     manifest["background"]["scripts"].extend(["managed-config.js", "managed.js"])
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as addon:
         for name in ("core.js", "background.js", "content.js", "popup.html", "popup.css", "popup.js", "managed.js"):
@@ -108,8 +109,10 @@ class ManagedFirefox:
         self.emit = emit
         self.task: asyncio.Task | None = None
         self.cleanup: set[asyncio.Task] = set()
+        self.pending_retry: tuple[str, str] | None = None
 
     def cancel(self):
+        self.pending_retry = None
         task, self.task = self.task, None
         if task and not task.done():
             task.cancel()
@@ -120,25 +123,35 @@ class ManagedFirefox:
         self.cancel()
         await asyncio.gather(*list(self.cleanup), return_exceptions=True)
 
-    def play(self, url: str):
+    def play(self, url: str, *, interactive: bool = False):
         url = checked_url(url.strip())
         executable = firefox_path()
         self.cancel()
-        self.emit("status", {"message": "Opening video link…", "busy": True})
-        self.task = asyncio.create_task(self._run(executable, url))
+        message = "Start the video in Firefox and leave it open." if interactive else "Opening video link…"
+        self.emit("status", {"message": message, "busy": True})
+        self.task = asyncio.create_task(self._run(executable, url, interactive=interactive))
 
-    async def _run(self, executable: str, url: str):
+    def continue_playback(self, retry_id: str, open_browser: bool):
+        if self.pending_retry and self.pending_retry[0] == retry_id:
+            _, url = self.pending_retry
+            self.pending_retry = None
+            if open_browser:
+                self.play(url, interactive=True)
+
+    async def _run(self, executable: str, url: str, *, interactive: bool):
         process = runner = folder = None
         active_requests: set[asyncio.Task] = set()
         ready = asyncio.Event()
         finished = asyncio.Event()
         error = None
+        rejected_source = None
+        offer_retry = False
         started = False
         token, session_id, extension_uuid = secrets.token_urlsafe(32), uuid.uuid4().hex, str(uuid.uuid4())
         port = 0
 
         async def command(request):
-            nonlocal error, started
+            nonlocal error, rejected_source, offer_retry, started
             if (request.remote != "127.0.0.1" or request.headers.get("Host") != f"127.0.0.1:{port}"
                     or request.headers.get("Origin") not in (None, f"moz-extension://{extension_uuid}")
                     or not secrets.compare_digest(request.headers.get("X-Lantern-Link", "").encode(), token.encode())):
@@ -157,12 +170,15 @@ class ManagedFirefox:
                 if not ready.is_set():
                     raise web.HTTPForbidden()
                 if action == "no-video":
-                    error = "The page did not start a playable video. Try a direct HLS or MP4 link."
-                    finished.set()
+                    if not started:
+                        error = rejected_source or "Lantern could not find a playable video on this page."
+                        offer_retry = not interactive
+                        finished.set()
                     return web.json_response({"ok": False})
                 message = validate_message(data)
                 source = message.get("source") or {}
-                if action not in {"play", "refresh"} or source.get("sessionId") != session_id:
+                if (action not in {"play", "refresh"} or source.get("sessionId") != session_id
+                        or (action == "play" and started) or finished.is_set()):
                     raise ValueError
                 source["preferCompatible"] = True
                 try:
@@ -170,13 +186,20 @@ class ManagedFirefox:
                         result = await self.handle(message)
                     started = started or action == "play"
                     return web.json_response(result)
-                except (BrowserCommandError, WebStreamError) as exc:
-                    error = str(exc)
+                except WebStreamError as exc:
+                    failure = str(exc)
+                    if action == "play":
+                        rejected_source = failure
+                        self.emit("status", {"message": "Looking for another video source…", "busy": True})
+                        return web.json_response({"ok": False, "retryable": True})
+                except BrowserCommandError as exc:
+                    failure = str(exc)
                 except (TimeoutError, OSError):
-                    error = "The video link took too long to start."
+                    failure = "The video link took too long to respond."
                 if action == "play":
+                    error = failure
                     finished.set()
-                return web.json_response({"ok": False, "error": error})
+                return web.json_response({"ok": False, "error": failure})
             except (ValueError, TypeError, RecursionError):
                 raise web.HTTPBadRequest() from None
             finally:
@@ -215,19 +238,22 @@ class ManagedFirefox:
                 encoding="utf-8",
             )
             addon = folder / "lantern.xpi"
-            managed_addon(addon, {"endpoint": f"http://127.0.0.1:{port}/command", "token": token, "sessionId": session_id})
+            managed_addon(addon, {"endpoint": f"http://127.0.0.1:{port}/command", "token": token,
+                                 "sessionId": session_id, "interactive": interactive})
+            window_args = [] if interactive else ["-headless"]
             process = await asyncio.create_subprocess_exec(
-                executable, "-wait-for-browser", "-headless", "-no-remote", "-profile", str(profile),
+                executable, "-wait-for-browser", *window_args, "-no-remote", "-profile", str(profile),
                 "-marionette", "about:blank", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}),
             )
             await bootstrap(process, setup_port, addon)
             ready.set()
             async def startup_timeout():
-                nonlocal error
-                await asyncio.sleep(90)
+                nonlocal error, offer_retry
+                await asyncio.sleep(230 if interactive else 90)
                 if not started:
-                    error = "The page did not start a playable video."
+                    error = rejected_source or "Lantern could not find a playable video on this page."
+                    offer_retry = not interactive
                     finished.set()
 
             watchdog = asyncio.create_task(startup_timeout())
@@ -239,11 +265,12 @@ class ManagedFirefox:
                 for watcher in watchers:
                     watcher.cancel()
                 await asyncio.gather(*watchers, return_exceptions=True)
-            if error:
+            if error and not offer_retry:
                 raise BrowserCommandError(error)
-            if not started:
+            if not started and not offer_retry:
                 raise BrowserCommandError("Firefox closed before the video started.")
-            await self.handle({"action": "stop", "source": {"sessionId": session_id}})
+            if started:
+                await self.handle({"action": "stop", "source": {"sessionId": session_id}})
         except BrowserCommandError as exc:
             self.emit("error", {"message": str(exc)})
         except (TimeoutError, OSError, ValueError, asyncio.IncompleteReadError):
@@ -279,3 +306,6 @@ class ManagedFirefox:
                         pass
                     # Windows can briefly retain a handle after Firefox exits.
                     await asyncio.sleep(0.25)
+        if offer_retry and self.task is asyncio.current_task():
+            self.pending_retry = (session_id, url)
+            self.emit("web.interaction_required", {"retry_id": session_id, "message": error})

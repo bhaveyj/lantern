@@ -3,7 +3,10 @@
 Connect to your TV and choose **Paste video link** in the Windows app. Direct
 HTTPS HLS and MP4 links play immediately. For a watch page, install Firefox
 normally and Lantern will open and close a private browser session for you.
-Some pages need playback interaction or use a format the receiver cannot play.
+Lantern looks for the playing video and tries other detected sources if the
+first source fails. If the page needs help, choose **Open Firefox** when prompted.
+Start the movie or choose a player in the visible Firefox window. Lantern sends
+the video to the TV when it finds a compatible source.
 
 The following steps are for sending video from your own Firefox tab using the
 optional manual companion.

@@ -81,11 +81,11 @@ async function native(message) {
     return {ok: false, error: "Install the Lantern Firefox bridge, then open Lantern and connect your TV."};
   }
 }
-function selectedSource(item, candidate, tab) {
+function selectedSource(item, candidate, tab, sessionId) {
   const players = item.players.get(candidate.frameId) || [];
   const player = players.reduce((best, next) => !best || Core.score(candidate, [next]) > Core.score(candidate, [best]) ? next : best, null);
   return {url: candidate.url, title: String(tab.title || "Firefox video").slice(0, 240), pageUrl: tab.url,
-    mimeType: candidate.mimeType, sessionId: active.sessionId, rootHeaders: candidate.headers,
+    mimeType: candidate.mimeType, sessionId, rootHeaders: candidate.headers,
     headersByOrigin: snapshot(item, candidate.frameId), subtitles: player?.subtitles || []};
 }
 function sourceFingerprint(source) {
@@ -111,7 +111,7 @@ async function refreshActive() {
   try {
     const tab = await browser.tabs.get(selection.tabId);
     if (active !== selection) return;
-    const source = selectedSource(item, candidate, tab);
+    const source = selectedSource(item, candidate, tab, active.sessionId);
     const fingerprint = sourceFingerprint(source);
     if (fingerprint === selection.lastFingerprint) return;
     selection.nextRefreshAt = Date.now() + 10000;
@@ -207,6 +207,11 @@ browser.runtime.onMessage.addListener(async (message, sender) => {
       if (!mimeType || (mimeType === "video/mp4" && hlsFrame && candidate.kind === "resource")) continue;
       rememberCandidate(item, sender.tab.id, {url: candidate.url, mimeType, kind: candidate.kind, frameId: sender.frameId});
     }
+    // The frame may advertise a compatible stream in its own player URL.
+    // Attribute it to the frame playing the movie, with its request context.
+    for (const candidate of Core.discoverMedia(sender.url).candidates) {
+      rememberCandidate(item, sender.tab.id, {...candidate, kind: "iframe", frameId: sender.frameId});
+    }
     void refreshActive();
     return {};
   }
@@ -235,7 +240,7 @@ browser.runtime.onMessage.addListener(async (message, sender) => {
     active = {tabId: tab.id, frameId: candidate.frameId, identity: Core.identity(candidate.url), sessionId: crypto.randomUUID(), nextRefreshAt: Date.now() + 10000,
       failures: 0, wasMuted: inheritedMute ? false : !!tab.mutedInfo?.muted, mutedByUs: !!inheritedMute};
     const selection = active;
-    const source = selectedSource(item, candidate, tab);
+    const source = selectedSource(item, candidate, tab, active.sessionId);
     const result = await native({action: "play", source});
     if (result.ok === false) {
       if (active === selection) { active = null; await restoreMute(selection); }

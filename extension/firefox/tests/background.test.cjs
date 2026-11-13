@@ -24,10 +24,49 @@ function harness() {
     events.request(details);
     events.response({...details,statusCode:200,responseHeaders:[{name:'Content-Type',value:mime}]});
   }
+  function runManaged(reply) {
+    const requests = [];
+    let finish;
+    const done = new Promise(resolve => { finish = resolve; });
+    context.LANTERN_MANAGED = {endpoint:'http://127.0.0.1/command',token:'test-token',sessionId:'managed-session'};
+    context.AbortSignal = AbortSignal;
+    context.setTimeout = (callback, delay) => { now += delay; callback(); };
+    context.fetch = async (_url, options) => {
+      const message = JSON.parse(options.body);
+      requests.push(message);
+      const result = message.action === 'open' ? {url:tab.url} : reply(message);
+      if (message.action === 'no-video' || (message.action === 'play' && !result.retryable)) finish();
+      return {ok:true,json:async()=>result};
+    };
+    vm.runInContext(fs.readFileSync(require.resolve('../managed.js'),'utf8'),context);
+    return {requests,done};
+  }
   return {events,calls,updates,popup,media,tab,
     play:(url,frameId=3,extra={})=>events.message({type:'play',candidateKey:`${frameId}:${url}`,...extra},popup),
-    advance:ms=>{now+=ms;}, result:fn=>{nativeResult=fn;}, flush:()=>new Promise(setImmediate)};
+    advance:ms=>{now+=ms;}, result:fn=>{nativeResult=fn;}, flush:()=>new Promise(setImmediate), runManaged};
 }
+
+test('managed playback retries a rejected source using the embedded player URL',async()=>{
+  const h = harness();
+  const first = 'https://cdn.test/blocked.m3u8';
+  const alternate = 'https://video.test/movie.m3u8';
+  h.media(first,3);
+  await h.events.message({type:'players',players:[{playing:true,src:first,width:1280,height:720}]},
+    {tab:h.tab,frameId:3,url:'https://player.test/embed?hls='+encodeURIComponent(alternate)});
+  const run = h.runManaged(({source}) => source?.url === first ? {ok:false,retryable:true} : {ok:true});
+  await run.done;
+  assert.deepEqual(run.requests.map(message => message.source?.url || message.action),['open',first,alternate]);
+});
+
+test('managed playback limits rejected candidates and asks for a browser retry',async()=>{
+  const h = harness();
+  for (let i = 0; i < 6; i++) h.media(`https://cdn.test/movie-${i}.m3u8`);
+  await h.events.message({type:'players',players:[{playing:true,width:1280,height:720}]},{tab:h.tab,frameId:3});
+  const run = h.runManaged(() => ({ok:false,retryable:true}));
+  await run.done;
+  assert.equal(run.requests.filter(message => message.action === 'play').length,4);
+  assert.equal(run.requests.at(-1).action,'no-video');
+});
 
 test('popup only can initiate casting; content script cannot invoke native commands',async()=>{
   const h=harness(); h.media('https://cdn.test/main.m3u8');
