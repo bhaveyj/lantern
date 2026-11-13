@@ -10,7 +10,7 @@ import pytest
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtNetwork import QHostAddress, QNetworkAddressEntry, QNetworkInterface
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from lantern.app import PlaylistDelegate, Window, Worker
 from lantern import app, controller, watch
@@ -447,5 +447,22 @@ async def test_paste_video_link_uses_the_connected_receiver(qt_app, monkeypatch,
         assert calls == [("play_link", "https://example.com/watch/123")]
     finally:
         monkeypatch.setattr(window.worker, "submit", submit)
+        window.quit()
+        await qt_wait(qt_app, lambda: window._shutdown_complete)
+
+
+async def test_link_interaction_prompt_opens_the_same_request(qt_app, monkeypatch, tmp_path):
+    window = Window(tmp_path / "data", discover=False)
+    calls = []
+    try:
+        await qt_wait(qt_app, lambda: window.worker.ready.is_set())
+        with monkeypatch.context() as patch:
+            patch.setattr(window.worker, "submit", lambda *args: calls.append(args))
+            patch.setattr(QMessageBox, "exec", lambda dialog: next(
+                button for button in dialog.buttons() if button.text() == "Open Firefox"
+            ).click())
+            window.on_event("web.interaction_required", {"retry_id": "test-request", "message": "Start the movie."})
+        assert calls == [("continue_video_link", "test-request", True)]
+    finally:
         window.quit()
         await qt_wait(qt_app, lambda: window._shutdown_complete)

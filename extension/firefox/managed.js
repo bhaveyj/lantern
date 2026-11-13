@@ -13,6 +13,7 @@ async function managedRequest(message) {
 }
 
 const waitForPlayer = () => new Promise(resolve => setTimeout(resolve, 500));
+const MAX_SOURCE_ATTEMPTS = 4;
 
 async function openManagedVideo() {
   let url;
@@ -29,29 +30,38 @@ async function openManagedVideo() {
     return;
   }
   await browser.tabs.update(tab.id, {url, muted: true});
-  const deadline = Date.now() + 40000;
+  const deadline = Date.now() + (LANTERN_MANAGED.interactive ? 180000 : 40000);
+  const attempted = new Set();
   let previous;
-  while (Date.now() < deadline) {
+  while (Date.now() < deadline && attempted.size < MAX_SOURCE_ATTEMPTS) {
     await waitForPlayer();
     const item = tabs.get(tab.id);
-    if (!item) continue;
-    const players = [...item.players.values()].flat().filter(player => player.playing && player.width && player.height);
-    const candidate = [...item.candidates.values()]
-      .filter(source => players.some(player => player.frameId === source.frameId))
-      .sort((a, b) => Core.score(b, players) - Core.score(a, players) || b.seen - a.seen)[0];
-    if (!candidate) continue;
-    const identity = Core.identity(candidate.url);
-    if (identity !== previous) {
-      previous = identity;
+    const players = item ? [...item.players.values()].flat().filter(player => player.playing && player.width && player.height) : [];
+    const playingFrames = new Set(players.map(player => player.frameId));
+    const choice = item && [...item.candidates.values()]
+      .filter(source => playingFrames.has(source.frameId))
+      .map(source => {
+        const identity = Core.identity(source.url);
+        return {source, identity, key: `${source.frameId}:${identity}`};
+      })
+      .filter(entry => !attempted.has(entry.key))
+      .sort((a, b) => Core.score(b.source, players) - Core.score(a.source, players) || b.source.seen - a.source.seen)[0];
+    if (!choice || choice.key !== previous) {
+      previous = choice?.key;
       continue;
     }
+    const {source: candidate, identity, key} = choice;
+    attempted.add(key);
+    previous = undefined;
     const current = await browser.tabs.get(tab.id);
-    active = {tabId: tab.id, frameId: candidate.frameId, identity, sessionId: LANTERN_MANAGED.sessionId,
-      nextRefreshAt: Date.now() + 10000, failures: 0};
-    const source = selectedSource(item, candidate, current);
-    active.lastFingerprint = sourceFingerprint(source);
-    await managedRequest({action: "play", source});
-    return;
+    const source = selectedSource(item, candidate, current, LANTERN_MANAGED.sessionId);
+    const result = await managedRequest({action: "play", source});
+    if (result.ok) {
+      active = {tabId: tab.id, frameId: candidate.frameId, identity, sessionId: LANTERN_MANAGED.sessionId,
+        nextRefreshAt: Date.now() + 10000, failures: 0, lastFingerprint: sourceFingerprint(source)};
+      return;
+    }
+    if (!result.retryable) return;
   }
   await managedRequest({action: "no-video"});
 }

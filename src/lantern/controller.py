@@ -212,6 +212,9 @@ class Controller:
             return
         self.link_browser.play(url)
 
+    async def continue_video_link(self, retry_id: str, open_browser: bool):
+        self.link_browser.continue_playback(retry_id, open_browser and self.browser_connected())
+
     async def browser_message(self, message: dict) -> dict:
         """Commands from the allowlisted Firefox companion, never from a webpage."""
         action = message.get("action")

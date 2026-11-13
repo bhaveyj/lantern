@@ -1211,6 +1211,17 @@ class Window(QMainWindow):
             self.connect_button.setText("Connect")
             self.fit.setEnabled(False)
             self.update_connection_button()
+        elif event == "web.interaction_required":
+            self.busy = False
+            self.progress.hide()
+            self.status.setText(data["message"])
+            prompt = QMessageBox(QMessageBox.Icon.Information, "Start video in Firefox", data["message"],
+                                 QMessageBox.StandardButton.Cancel, self)
+            prompt.setTextFormat(Qt.TextFormat.PlainText)
+            prompt.setInformativeText("In Firefox, start the movie or choose a player. Keep the window open while you watch on the TV.")
+            open_firefox = prompt.addButton("Open Firefox", QMessageBox.ButtonRole.AcceptRole)
+            prompt.exec()
+            self.worker.submit("continue_video_link", data["retry_id"], prompt.clickedButton() == open_firefox)
         elif event == "status":
             self.status.setText(data["message"])
             self.busy = data.get("busy", False)
