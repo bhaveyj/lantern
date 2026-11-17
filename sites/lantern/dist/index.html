@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0a0d14">
-  <meta name="description" content="Stream the videos on your Windows PC to Android TV, Google TV, or a compatible Google Cast device. No account or cloud upload for local playback.">
+  <meta name="description" content="Stream your Windows media to Android TV, Google TV, or Google Cast. Generate subtitles on your PC with built-in speech-to-text.">
   <meta property="og:title" content="Lantern TV — Your videos. On your TV.">
   <meta property="og:description" content="Play the videos you already have on the biggest screen in the house.">
   <title>Lantern TV — Your videos. On your TV.</title>
@@ -24,6 +24,7 @@
     </a>
     <nav aria-label="Main">
       <a href="#how-it-works">How it works</a>
+      <a href="#features">Features</a>
       <a href="#compatibility">Compatibility</a>
       <a href="https://github.com/bhaveyj/lantern" class="nav-source">GitHub <span aria-hidden="true">↗</span></a>
     </nav>
@@ -51,83 +52,106 @@
     </section>
 
     <section class="how" id="how-it-works" aria-labelledby="how-title">
-      <div class="shell section-intro">
+      <div class="shell section-intro" data-reveal>
         <p class="kicker"><span></span> How it works</p>
         <h2 id="how-title">From file to full screen.</h2>
         <p>The first time you use the Lantern receiver, pair it with the code on your TV. After that, Lantern remembers it.</p>
       </div>
       <div class="story shell" data-story>
-        <div class="story-stage" aria-hidden="true">
-          <div class="story-tv device-tv">
-            <div class="standby"></div>
-            <img class="pair-frame" src="assets/pairing.webp" width="1120" height="630" alt="">
-            <img class="film-frame" src="assets/coast.webp" width="1440" height="810" alt="">
-            <span class="caption story-caption">Let’s take the coast road.</span>
+        <div class="story-pin">
+          <div class="story-stage" aria-hidden="true">
+            <div class="story-tv device-tv">
+              <div class="standby"></div>
+              <img class="pair-frame" src="assets/pairing.webp" width="1120" height="630" alt="">
+              <img class="film-frame" src="assets/coast.webp" width="1440" height="810" alt="">
+              <span class="caption story-caption">Let’s take the coast road.</span>
+            </div>
+            <div class="story-pc device-pc">
+              <img src="assets/windows.webp" width="960" height="626" alt="">
+            </div>
+            <img class="story-transfer" src="assets/coast.webp" width="1440" height="810" alt="">
           </div>
-          <div class="story-pc device-pc">
-            <img src="assets/windows.webp" width="960" height="626" alt="">
-          </div>
-          <img class="story-transfer" src="assets/coast.webp" width="1440" height="810" alt="">
+          <ol class="story-steps" role="list">
+            <li class="story-step">
+              <div class="step-copy">
+                <p class="step-number" aria-hidden="true">01</p>
+                <h3>Pick a video.</h3>
+                <p>Add a file to your Lantern playlist on Windows. Queue up the next one while you’re there.</p>
+              </div>
+              <figure class="step-still">
+                <img src="assets/windows.webp" width="960" height="626" loading="lazy" alt="Lantern’s Windows playlist with a sample video selected">
+              </figure>
+            </li>
+            <li class="story-step">
+              <div class="step-copy">
+                <p class="step-number" aria-hidden="true">02</p>
+                <h3>Pair your TV.</h3>
+                <p>Open the Lantern receiver on your TV. Choose it on your PC and enter the six-digit code on screen.</p>
+              </div>
+              <figure class="step-still">
+                <img src="assets/pairing.webp" width="1120" height="630" loading="lazy" alt="The Lantern TV receiver showing a six-digit pairing code">
+              </figure>
+            </li>
+            <li class="story-step">
+              <div class="step-copy">
+                <p class="step-number" aria-hidden="true">03</p>
+                <h3>Press play.</h3>
+                <p>The video plays over your home network. Use your TV remote to pause, seek, or switch captions with the Lantern receiver.</p>
+              </div>
+              <figure class="step-still step-film">
+                <img src="assets/coast.webp" width="1440" height="810" loading="lazy" alt="A sample film playing with captions on the TV">
+                <span class="caption" aria-hidden="true">Let’s take the coast road.</span>
+              </figure>
+            </li>
+          </ol>
+          <div class="story-progress" aria-hidden="true"></div>
         </div>
-        <ol class="story-steps">
-          <li class="story-step">
-            <div class="step-copy">
-              <p class="step-number" aria-hidden="true">01</p>
-              <h3>Pick a video.</h3>
-              <p>Add a file to your Lantern playlist on Windows. Queue up the next one while you’re there.</p>
-            </div>
-            <figure class="step-still">
-              <img src="assets/windows.webp" width="960" height="626" loading="lazy" alt="Lantern’s Windows playlist with a sample video selected">
-            </figure>
-          </li>
-          <li class="story-step">
-            <div class="step-copy">
-              <p class="step-number" aria-hidden="true">02</p>
-              <h3>Pair your TV.</h3>
-              <p>Open the Lantern receiver on your TV. Choose it on your PC and enter the six-digit code on screen.</p>
-            </div>
-            <figure class="step-still">
-              <img src="assets/pairing.webp" width="1120" height="630" loading="lazy" alt="The Lantern TV receiver showing a six-digit pairing code">
-            </figure>
-          </li>
-          <li class="story-step">
-            <div class="step-copy">
-              <p class="step-number" aria-hidden="true">03</p>
-              <h3>Press play.</h3>
-              <p>The video plays over your home network. Use your TV remote to pause, seek, or switch captions with the Lantern receiver.</p>
-            </div>
-            <figure class="step-still step-film">
-              <img src="assets/coast.webp" width="1440" height="810" loading="lazy" alt="A sample film playing with captions on the TV">
-              <span class="caption" aria-hidden="true">Let’s take the coast road.</span>
-            </figure>
-          </li>
-        </ol>
       </div>
     </section>
 
-    <section class="subtitles" aria-labelledby="subtitle-title">
+    <section class="features" id="features" aria-labelledby="subtitle-title">
       <div class="shell subtitle-layout">
-        <figure class="subtitle-visual">
+        <figure class="subtitle-visual" data-reveal>
           <img src="assets/coast.webp" width="1440" height="810" loading="lazy" alt="">
-          <span class="caption">Let’s take the coast road.</span>
+          <figcaption class="caption">Let’s take the coast road.</figcaption>
         </figure>
-        <div class="subtitle-copy">
-          <p class="kicker"><span></span> Subtitles</p>
-          <h2 id="subtitle-title">Catch every line.</h2>
-          <p>Use a matching subtitle file, extract an embedded text track, or generate captions on your PC.</p>
-          <p>Local generation works offline after the first model download.</p>
+        <div class="subtitle-copy" data-reveal>
+          <p class="kicker"><span></span> Built-in speech-to-text</p>
+          <h2 id="subtitle-title">Turn dialogue into subtitles.</h2>
+          <p>Lantern uses Whisper to transcribe video audio on your Windows PC. It supports English and Hindi, and works offline after the first model download. Your audio stays on your PC.</p>
+          <p>Lantern can also find nearby SRT or WebVTT files and extract embedded text tracks. Optional cloud transcription uses your own Deepgram API key.</p>
           <a class="text-link" href="https://github.com/bhaveyj/lantern/blob/main/docs/media.md">Read the subtitle guide <span aria-hidden="true">↗</span></a>
         </div>
+      </div>
+      <div class="shell feature-grid">
+        <article data-reveal>
+          <h3>Stream your own media</h3>
+          <p>Play videos and music from your Windows PC over your home network. Local playback needs no Lantern account or cloud upload.</p>
+        </article>
+        <article data-reveal>
+          <h3>Keep your queue in sync</h3>
+          <p>Reorder your playlist on Windows or from the Lantern receiver. Use your TV remote to pause, seek, switch captions, or adjust picture fit.</p>
+        </article>
+        <article data-reveal>
+          <h3>Watch on a phone or tablet</h3>
+          <p>Copy a watch link for a video in your playlist. Open it in a browser on the same home network, with seeking and attached text subtitles.</p>
+          <a class="text-link" href="https://github.com/bhaveyj/lantern#watch-on-a-phone-tablet-or-browser">How watch links work <span aria-hidden="true">↗</span></a>
+        </article>
+        <article data-reveal>
+          <h3>Send a video link to your TV</h3>
+          <p>Paste a public HTTPS HLS or MP4 link into Lantern. With Firefox installed, Lantern can also detect compatible streams on supported watch pages.</p>
+          <a class="text-link" href="https://github.com/bhaveyj/lantern/blob/main/docs/web-streaming.md">See supported sources <span aria-hidden="true">↗</span></a>
+        </article>
       </div>
     </section>
 
     <section class="shell compatibility" id="compatibility" aria-labelledby="compatibility-title">
-      <div class="section-intro">
+      <div class="section-intro" data-reveal>
         <p class="kicker"><span></span> Compatibility</p>
         <h2 id="compatibility-title">Will it work with my TV?</h2>
         <p>You’ll need a Windows 10 or 11 x64 PC and a compatible TV or Cast device on the same home network.</p>
       </div>
-      <div class="connection-options">
+      <div class="connection-options" data-reveal>
         <article>
           <h3>Android TV or Google TV</h3>
           <p>Install the Lantern receiver and pair with the code on your TV. Get encrypted playback, a synced playlist, captions, and TV remote controls.</p>
@@ -150,7 +174,7 @@
     </section>
 
     <section class="start" id="get-started" aria-labelledby="start-title">
-      <div class="shell start-layout">
+      <div class="shell start-layout" data-reveal>
         <div>
           <p class="kicker"><span></span> Development preview</p>
           <h2 id="start-title">Get Lantern.</h2>
